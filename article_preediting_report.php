@@ -1,24 +1,16 @@
 <?php
 /**
- * Article Pre-editing Report (Client-wise, completion-gated) - XLS export
- * ----------------------------------------------------------------------
- * Lists, per client, every article and the CE/PE/XML work done on it at the
- * FP stage over a DATE RANGE. An article is reported ONLY when the LAST
- * department in that client's configured pipeline is Completed (e.g. IAP =>
- * XML must be completed, not just CE).
+ * Article Pre-editing Report (Client-wise, completion-gated)
+ * ----------------------------------------------------------
+ * Web page: pick a From date and To date, click "Show report" to see the
+ * result grid; the XLS file downloads automatically.
  *
- * Output: an Excel-readable .xls file (HTML-table based SpreadsheetML-lite,
- * no external library needed). Opens directly in Excel / LibreOffice.
+ * An article is reported ONLY when the LAST department in that client's
+ * configured pipeline is Completed (e.g. IAP => XML must be completed).
+ * Only FP-stage transactions are considered.
  *
- * Usage (CLI):
- *   php article_preediting_report.php                          # 2026-09-01 .. 2026-09-30, saved to ./
- *   php article_preediting_report.php 2026-09-01 2026-09-30    # explicit range
- *   php article_preediting_report.php 2026-09-01 2026-09-30 /path/out.xls
- *   php article_preediting_report.php 2026-09-01 2026-09-30 --mail   # also email it
- *
- * Usage (browser): open article_preediting_report.php, pick From / To dates,
- *   click "Show report" to view the grid, then "Download XLS" to get the file.
- *   Direct link: ?from=2026-09-01&to=2026-09-30[&download=1]
+ * URL: article_preediting_report.php?from=2026-09-01&to=2026-09-30
+ *      (&download=1 returns just the .xls file)
  */
 
 date_default_timezone_set('Asia/Kolkata'); // adjust to your timezone
@@ -52,23 +44,16 @@ const CLIENT_STAGES = [
 const DEFAULT_FROM = '2026-09-01';
 const DEFAULT_TO   = '2026-09-30';
 
-// --- Resolve inputs (CLI args or query string) ------------------------------
-$isCli = PHP_SAPI === 'cli';
-$sendMail = false;
-$outPath  = null;
+// --- Resolve inputs (query string) -------------------------------------------
+$dateFrom  = $_GET['from'] ?? DEFAULT_FROM;
+$dateTo    = $_GET['to']   ?? DEFAULT_TO;
+$submitted = isset($_GET['from']) || isset($_GET['to']);
+$download  = isset($_GET['download']);
 
-if ($isCli) {
-    $args = array_slice($argv, 1);
-    $sendMail = in_array('--mail', $args, true);
-    $args = array_values(array_filter($args, fn($a) => $a !== '--mail'));
-    $dateFrom = $args[0] ?? DEFAULT_FROM;
-    $dateTo   = $args[1] ?? DEFAULT_TO;
-    $outPath  = $args[2] ?? null;
-} else {
-    $dateFrom = $_GET['from'] ?? DEFAULT_FROM;
-    $dateTo   = $_GET['to']   ?? DEFAULT_TO;
-    $submitted = isset($_GET['from']) || isset($_GET['to']);
-    $download  = isset($_GET['download']);
+// First visit: just the date picker.
+if (!$submitted) {
+    echo renderPage(null, $dateFrom, $dateTo, null);
+    exit(0);
 }
 
 $error = null;
@@ -80,10 +65,7 @@ foreach ([$dateFrom, $dateTo] as $d) {
 if (!$error && $dateFrom > $dateTo) {
     $error = "From date ({$dateFrom}) is after To date ({$dateTo}).";
 }
-if ($error && $isCli) {
-    fail($error);
-}
-if ($error && !$isCli) {
+if ($error) {
     echo renderPage(null, $dateFrom, $dateTo, $error);
     exit(0);
 }
@@ -98,13 +80,8 @@ try {
         PDO::ATTR_EMULATE_PREPARES   => false,
     ]);
 } catch (PDOException $e) {
-    fail('DB connection failed: ' . $e->getMessage());
-}
-
-// --- Browser: first visit shows the date picker only ------------------------
-if (!$isCli && !$submitted) {
-    echo renderPage(null, $dateFrom, $dateTo, null);
-    exit(0);
+    echo renderPage(null, $dateFrom, $dateTo, 'Database connection failed.');
+    exit(1);
 }
 
 // --- Fetch + build the XLS --------------------------------------------------
@@ -113,40 +90,16 @@ $xls  = renderReportXls($rows, $dateFrom, $dateTo);
 
 $fileName = sprintf('Article_PreEditing_Report_%s_to_%s.xls', $dateFrom, $dateTo);
 
-if (!$isCli && !$download) {
-    // Browser: show the grid with a Download XLS button.
+if (!$download) {
+    // Show the grid; the page auto-starts the XLS download.
     echo renderPage($rows, $dateFrom, $dateTo, null);
     exit(0);
 }
 
-if (!$isCli) {
-    // Browser: stream as a download.
-    header('Content-Type: application/vnd.ms-excel; charset=UTF-8');
-    header('Content-Disposition: attachment; filename="' . $fileName . '"');
-    header('Cache-Control: max-age=0');
-    echo $xls;
-    exit(0);
-}
-
-// CLI: write to disk.
-if ($outPath === null) {
-    $outPath = __DIR__ . '/' . $fileName;
-} elseif (is_dir($outPath)) {
-    $outPath = rtrim($outPath, '/\\') . '/' . $fileName;
-}
-if (file_put_contents($outPath, $xls) === false) {
-    fail("Could not write {$outPath}");
-}
-echo "XLS saved: {$outPath} (" . count($rows) . " articles, {$dateFrom} to {$dateTo}).\n";
-
-if ($sendMail) {
-    $subject = sprintf('Article Pre-editing Report - %s to %s', $dateFrom, $dateTo);
-    $body    = sprintf('<p>Please find attached the Article Pre-editing Report for %s to %s (%d articles).</p>',
-        h($dateFrom), h($dateTo), count($rows));
-    $sent = sendReport($config['mail'], $subject, $body, $outPath);
-    echo $sent ? "Report emailed.\n" : "Emailing FAILED.\n";
-    exit($sent ? 0 : 1);
-}
+header('Content-Type: application/vnd.ms-excel; charset=UTF-8');
+header('Content-Disposition: attachment; filename="' . $fileName . '"');
+header('Cache-Control: max-age=0');
+echo $xls;
 exit(0);
 
 
@@ -365,113 +318,24 @@ function renderPage(?array $rows, string $dateFrom, string $dateTo, ?string $err
         . '<label>To date <input type="date" name="to" required value="' . h($dateTo) . '"></label>'
         . '<button type="submit">Show report</button>';
     if ($rows !== null) {
-        $o .= '<a class="btn" href="?' . h($q) . '">Download XLS</a>'
-            . '<span>' . count($rows) . ' article(s)</span>';
+        $o .= '<span>' . count($rows) . ' article(s) &mdash; XLS download started '
+            . '(<a href="?' . h($q) . '">download again</a>)</span>';
     }
     $o .= '</form>';
     if ($error) {
         $o .= '<div class="err">' . h($error) . '</div>';
     }
     if ($rows !== null) {
-        $o .= '<div class="wrap">' . buildReportTable($rows, $dateFrom, $dateTo) . '</div>';
+        $o .= '<div class="wrap">' . buildReportTable($rows, $dateFrom, $dateTo) . '</div>'
+            . '<iframe src="?' . h($q) . '" style="display:none" title="XLS download"></iframe>';
     }
     return $o . '</body></html>';
 }
 
 
 /* =========================================================================
- * Mail (optional, with the XLS attached)
- * ======================================================================= */
-
-function sendReport(array $mail, string $subject, string $html, string $attachment): bool
-{
-    if (!empty($mail['use_smtp'])) {
-        return sendViaPhpMailer($mail, $subject, $html, $attachment);
-    }
-    return sendViaMail($mail, $subject, $html, $attachment);
-}
-
-/** Preferred: PHPMailer over SMTP. */
-function sendViaPhpMailer(array $mail, string $subject, string $html, string $attachment): bool
-{
-    $autoload = __DIR__ . '/smtpmail/phpmailer/class.phpmailer.php';
-    if (!is_file($autoload)) {
-        fwrite(STDERR, "PHPMailer not installed; falling back to mail().\n");
-        return sendViaMail($mail, $subject, $html, $attachment);
-    }
-    require_once $autoload;
-
-    $m = new PHPMailer();
-    try {
-        $m->isSMTP();
-        $m->Host       = $mail['smtp_host'];
-        $m->Port       = (int) $mail['smtp_port'];
-        $m->SMTPAuth   = true;
-        $m->Username   = $mail['smtp_user'];
-        $m->Password   = $mail['smtp_pass'];
-        $m->SMTPSecure = $mail['smtp_secure'];
-
-        $m->setFrom($mail['from_email'], $mail['from_name']);
-        foreach ($mail['to'] as $addr => $name) {
-            $m->addAddress($addr, $name);
-        }
-        foreach (($mail['cc'] ?? []) as $addr => $name) {
-            $m->addCC($addr, $name);
-        }
-
-        $m->isHTML(true);
-        $m->Subject = $subject;
-        $m->Body    = $html;
-        $m->AltBody = strip_tags($html);
-        $m->addAttachment($attachment, basename($attachment));
-
-        $m->send();
-        return true;
-    } catch (Throwable $e) {
-        fwrite(STDERR, 'PHPMailer error: ' . $e->getMessage() . "\n");
-        return false;
-    }
-}
-
-/** Fallback: PHP mail() with a MIME attachment. */
-function sendViaMail(array $mail, string $subject, string $html, string $attachment): bool
-{
-    $to       = implode(', ', array_keys($mail['to']));
-    $boundary = 'b' . md5((string) microtime(true));
-
-    $headers   = [];
-    $headers[] = 'MIME-Version: 1.0';
-    $headers[] = sprintf('From: %s <%s>', $mail['from_name'], $mail['from_email']);
-    if (!empty($mail['cc'])) {
-        $headers[] = 'Cc: ' . implode(', ', array_keys($mail['cc']));
-    }
-    $headers[] = "Content-Type: multipart/mixed; boundary=\"{$boundary}\"";
-
-    $body  = "--{$boundary}\r\nContent-Type: text/html; charset=UTF-8\r\n\r\n{$html}\r\n";
-    $body .= "--{$boundary}\r\nContent-Type: application/vnd.ms-excel; name=\"" . basename($attachment) . "\"\r\n"
-           . "Content-Transfer-Encoding: base64\r\n"
-           . 'Content-Disposition: attachment; filename="' . basename($attachment) . "\"\r\n\r\n"
-           . chunk_split(base64_encode((string) file_get_contents($attachment)))
-           . "--{$boundary}--";
-
-    return mail($to, $subject, $body, implode("\r\n", $headers));
-}
-
-
-/* =========================================================================
  * Helpers
  * ======================================================================= */
-
-function fail(string $msg): void
-{
-    if (PHP_SAPI === 'cli') {
-        fwrite(STDERR, $msg . "\n");
-    } else {
-        http_response_code(400);
-        echo h($msg);
-    }
-    exit(1);
-}
 
 /** HTML-escape. */
 function h($value): string
