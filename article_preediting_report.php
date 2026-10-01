@@ -16,8 +16,9 @@
  *   php article_preediting_report.php 2026-09-01 2026-09-30 /path/out.xls
  *   php article_preediting_report.php 2026-09-01 2026-09-30 --mail   # also email it
  *
- * Usage (browser): article_preediting_report.php?from=2026-09-01&to=2026-09-30
- *   -> streams the .xls as a download.
+ * Usage (browser): open article_preediting_report.php, pick From / To dates,
+ *   click "Show report" to view the grid, then "Download XLS" to get the file.
+ *   Direct link: ?from=2026-09-01&to=2026-09-30[&download=1]
  */
 
 date_default_timezone_set('Asia/Kolkata'); // adjust to your timezone
@@ -66,15 +67,25 @@ if ($isCli) {
 } else {
     $dateFrom = $_GET['from'] ?? DEFAULT_FROM;
     $dateTo   = $_GET['to']   ?? DEFAULT_TO;
+    $submitted = isset($_GET['from']) || isset($_GET['to']);
+    $download  = isset($_GET['download']);
 }
 
+$error = null;
 foreach ([$dateFrom, $dateTo] as $d) {
     if (!preg_match('/^\d{4}-\d{2}-\d{2}$/', $d) || !strtotime($d)) {
-        fail("Invalid date '{$d}'. Use YYYY-MM-DD.");
+        $error = "Invalid date '{$d}'. Use YYYY-MM-DD.";
     }
 }
-if ($dateFrom > $dateTo) {
-    fail("From date ({$dateFrom}) is after To date ({$dateTo}).");
+if (!$error && $dateFrom > $dateTo) {
+    $error = "From date ({$dateFrom}) is after To date ({$dateTo}).";
+}
+if ($error && $isCli) {
+    fail($error);
+}
+if ($error && !$isCli) {
+    echo renderPage(null, $dateFrom, $dateTo, $error);
+    exit(0);
 }
 
 // --- Connect (PDO + prepared statements) ------------------------------------
@@ -90,11 +101,23 @@ try {
     fail('DB connection failed: ' . $e->getMessage());
 }
 
+// --- Browser: first visit shows the date picker only ------------------------
+if (!$isCli && !$submitted) {
+    echo renderPage(null, $dateFrom, $dateTo, null);
+    exit(0);
+}
+
 // --- Fetch + build the XLS --------------------------------------------------
 $rows = fetchArticleRows($pdo, $dateFrom, $dateTo, $config['filters']['stage']);
 $xls  = renderReportXls($rows, $dateFrom, $dateTo);
 
 $fileName = sprintf('Article_PreEditing_Report_%s_to_%s.xls', $dateFrom, $dateTo);
+
+if (!$isCli && !$download) {
+    // Browser: show the grid with a Download XLS button.
+    echo renderPage($rows, $dateFrom, $dateTo, null);
+    exit(0);
+}
 
 if (!$isCli) {
     // Browser: stream as a download.
@@ -235,6 +258,20 @@ function fetchArticleRows(PDO $pdo, string $dateFrom, string $dateTo, string $st
 
 function renderReportXls(array $rows, string $dateFrom, string $dateTo): string
 {
+    $x  = '<html xmlns:o="urn:schemas-microsoft-com:office:office" '
+        . 'xmlns:x="urn:schemas-microsoft-com:office:excel" xmlns="http://www.w3.org/TR/REC-html40">';
+    $x .= '<head><meta http-equiv="Content-Type" content="text/html; charset=UTF-8">'
+        . '<!--[if gte mso 9]><xml><x:ExcelWorkbook><x:ExcelWorksheets><x:ExcelWorksheet>'
+        . '<x:Name>PreEditing Report</x:Name><x:WorksheetOptions><x:DisplayGridlines/>'
+        . '</x:WorksheetOptions></x:ExcelWorksheet></x:ExcelWorksheets></x:ExcelWorkbook></xml><![endif]-->'
+        . '</head><body>' . buildReportTable($rows, $dateFrom, $dateTo) . '</body></html>';
+
+    return "\xEF\xBB\xBF" . $x; // UTF-8 BOM so Excel reads encoding correctly
+}
+
+/** The report grid (shared by the on-screen page and the XLS file). */
+function buildReportTable(array $rows, string $dateFrom, string $dateTo): string
+{
     $thStyle = 'style="border:1px solid #444;padding:4px;background:#1f4e78;color:#ffffff;font-weight:bold;text-align:left;vertical-align:top;"';
     $tdStyle = 'style="border:1px solid #999;padding:3px;vertical-align:top;"';
     // mso-number-format:'\@' forces text so IDs / numeric-looking values keep their form.
@@ -257,14 +294,7 @@ function renderReportXls(array $rows, string $dateFrom, string $dateTo): string
         'Actual pre-editing time spent on the file',
     ];
 
-    $x  = '<html xmlns:o="urn:schemas-microsoft-com:office:office" '
-        . 'xmlns:x="urn:schemas-microsoft-com:office:excel" xmlns="http://www.w3.org/TR/REC-html40">';
-    $x .= '<head><meta http-equiv="Content-Type" content="text/html; charset=UTF-8">'
-        . '<!--[if gte mso 9]><xml><x:ExcelWorkbook><x:ExcelWorksheets><x:ExcelWorksheet>'
-        . '<x:Name>PreEditing Report</x:Name><x:WorksheetOptions><x:DisplayGridlines/>'
-        . '</x:WorksheetOptions></x:ExcelWorksheet></x:ExcelWorksheets></x:ExcelWorkbook></xml><![endif]-->'
-        . '</head><body>';
-
+    $x = '';
     $x .= '<table border="1" cellspacing="0" cellpadding="3">';
     $x .= '<tr><td colspan="14" style="font-size:14pt;font-weight:bold;">'
         . 'Article Pre-editing Report (CE / PE / XML)</td></tr>';
@@ -313,9 +343,39 @@ function renderReportXls(array $rows, string $dateFrom, string $dateTo): string
             . 'mso-number-format:\'\\@\';">' . h(secondsToHms($grandSeconds)) . '</td></tr>';
     }
 
-    $x .= '</table></body></html>';
+    $x .= '</table>';
 
-    return "\xEF\xBB\xBF" . $x; // UTF-8 BOM so Excel reads encoding correctly
+    return $x;
+}
+
+/** Browser page: date pickers, grid, Download XLS button. */
+function renderPage(?array $rows, string $dateFrom, string $dateTo, ?string $error): string
+{
+    $q = http_build_query(['from' => $dateFrom, 'to' => $dateTo, 'download' => 1]);
+
+    $o  = '<!doctype html><html><head><meta charset="utf-8"><title>Article Pre-editing Report</title>'
+        . '<style>body{font-family:Calibri,Arial,sans-serif;font-size:13px;margin:16px;color:#222}'
+        . 'form{margin:0 0 14px}label{margin-right:12px}'
+        . 'button,a.btn{background:#1f4e78;color:#fff;border:0;padding:6px 14px;margin-right:8px;'
+        . 'text-decoration:none;cursor:pointer;font-size:13px;border-radius:3px}'
+        . '.err{color:#b00020;margin-bottom:10px}.wrap{overflow:auto}</style></head><body>';
+    $o .= '<h2 style="margin:0 0 10px">Article Pre-editing Report (CE / PE / XML)</h2>';
+    $o .= '<form method="get">'
+        . '<label>From date <input type="date" name="from" required value="' . h($dateFrom) . '"></label>'
+        . '<label>To date <input type="date" name="to" required value="' . h($dateTo) . '"></label>'
+        . '<button type="submit">Show report</button>';
+    if ($rows !== null) {
+        $o .= '<a class="btn" href="?' . h($q) . '">Download XLS</a>'
+            . '<span>' . count($rows) . ' article(s)</span>';
+    }
+    $o .= '</form>';
+    if ($error) {
+        $o .= '<div class="err">' . h($error) . '</div>';
+    }
+    if ($rows !== null) {
+        $o .= '<div class="wrap">' . buildReportTable($rows, $dateFrom, $dateTo) . '</div>';
+    }
+    return $o . '</body></html>';
 }
 
 
