@@ -28,7 +28,8 @@ require __DIR__ . '/includes/header.php';
 
     <div class="card svc hl">
       <div><p class="eyebrow">Core strength</p><h2 style="font-size:28px;margin-top:8px">API &amp; Third-Party Integrations</h2><p class="muted">Connect your website or application with the tools your business already uses.</p></div>
-      <ul class="list cols"><li>REST APIs</li><li>Payment gateways</li><li>CRM</li><li>ERP</li><li>Email services</li><li>SMS</li><li>Shipping APIs</li><li>Authentication</li><li>Webhooks</li><li>Data synchronization</li><li>Third-party platforms</li></ul>
+      <img class="fig" src="assets/img/api-integration.svg" width="640" height="400" loading="lazy" alt="Your application connected to payments, CRM, email, shipping, ERP and SMS" style="grid-column:1/-1">
+      <ul class="list cols" style="grid-column:1/-1"><li>REST APIs</li><li>Payment gateways</li><li>CRM</li><li>ERP</li><li>Email services</li><li>SMS</li><li>Shipping APIs</li><li>Authentication</li><li>Webhooks</li><li>Data synchronization</li><li>Third-party platforms</li></ul>
     </div>
 
     <div class="card svc">

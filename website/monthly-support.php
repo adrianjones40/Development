@@ -54,9 +54,12 @@ require __DIR__ . '/includes/header.php';
       <p class="lead">I can review your existing system, understand the codebase and provide ongoing development and maintenance.</p>
       <div class="btn-row"><a class="btn btn-w" href="contact.php?plan=Takeover#request">Request a System Review</a></div>
     </div>
+    <div>
+    <img class="fig" src="assets/img/takeover.svg" width="640" height="360" loading="lazy" alt="Messy legacy files turned into a documented, maintained application" style="margin-bottom:24px">
     <div class="card" style="background:transparent;border-color:#334155;padding:32px">
       <p style="color:#CBD5E1;margin:0">Typical starting point</p>
       <ol style="margin:16px 0 0;padding-left:20px;display:grid;gap:12px;color:#fff"><li>Review code, database and hosting</li><li>Document what exists and what is risky</li><li>Fix urgent issues, then agree a monthly plan</li></ol>
+    </div>
     </div>
   </div>
 </section>

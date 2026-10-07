@@ -5,7 +5,8 @@ $current = '';
 require __DIR__ . '/includes/header.php';
 ?>
 <section class="hero">
-  <div class="wrap">
+  <div class="wrap hero-grid">
+   <div>
     <p class="eyebrow">Remote development partner for US &amp; UK businesses and agencies</p>
     <h1><?= e(SITE_TAGLINE) ?></h1>
     <p class="lead">15+ years of experience helping businesses maintain, improve and develop websites, web applications and API integrations, on a simple monthly retainer.</p>
@@ -14,6 +15,8 @@ require __DIR__ . '/includes/header.php';
       <a class="btn btn-s" href="services.php">View Services</a>
     </div>
     <p class="stack">PHP &bull; Laravel &bull; WordPress &bull; MySQL &bull; JavaScript &bull; REST APIs</p>
+   </div>
+   <img class="fig" src="assets/img/hero-code.svg" width="640" height="480" alt="Code editor showing a Laravel route syncing an order with a CRM">
   </div>
 </section>
 
@@ -78,12 +81,7 @@ require __DIR__ . '/includes/header.php';
         <a class="btn btn-s" href="pricing.php">Compare Pricing</a>
       </div>
     </div>
-    <div class="card" style="background:var(--dark);border-color:var(--dark);color:#fff;padding:36px">
-      <p style="color:#93C5FD;font-size:13px;font-weight:600;letter-spacing:.1em;text-transform:uppercase;margin:0">Most popular</p>
-      <h3 style="font-size:28px;margin-top:10px">Business</h3>
-      <p style="font-family:var(--head);font-size:44px;font-weight:800;color:#fff;margin-top:8px;line-height:1.1">$599<span style="font-size:18px;font-weight:500;color:#CBD5E1">/month</span></p>
-      <p style="color:#CBD5E1">Up to 12 hours/month of PHP, Laravel, WordPress, MySQL and API work, with priority support.</p>
-    </div>
+    <img class="fig" src="assets/img/support-dashboard.svg" width="640" height="420" loading="lazy" alt="Monthly support dashboard with completed and in-progress tasks">
   </div>
 </section>
 
@@ -93,7 +91,10 @@ require __DIR__ . '/includes/header.php';
       <h2 style="font-size:clamp(24px,3vw,32px)">Need Someone to Take Over Your Existing Website?</h2>
       <p class="lead" style="font-size:18px">Previous developer disappeared? Old PHP application nobody understands? I review your system, understand the codebase and provide ongoing development and maintenance.</p>
     </div>
-    <div><a class="btn btn-p" href="contact.php">Request a System Review</a></div>
+    <div>
+      <img class="fig" src="assets/img/takeover.svg" width="640" height="360" loading="lazy" alt="Messy legacy files turned into a documented, maintained application">
+      <div class="btn-row"><a class="btn btn-p" href="contact.php">Request a System Review</a></div>
+    </div>
   </div>
 </section>
 

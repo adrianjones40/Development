@@ -1,0 +1,18 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 360" role="img" aria-labelledby="t"><title id="t">Messy legacy code reviewed and turned into a documented, maintained application</title>
+<rect width="640" height="360" rx="20" fill="#1E293B"/>
+<g font-family="Arial,sans-serif">
+<text x="40" y="50" font-size="13" font-weight="700" fill="#94A3B8" letter-spacing="1.5">BEFORE</text>
+<text x="380" y="50" font-size="13" font-weight="700" fill="#93C5FD" letter-spacing="1.5">AFTER</text></g>
+<g font-family="ui-monospace,Menlo,Consolas,monospace" font-size="13" fill="#CBD5E1">
+<g transform="rotate(-4 120 110)"><rect x="40" y="80" width="150" height="40" rx="8" fill="#334155"/><text x="54" y="105">index_old.php</text></g>
+<g transform="rotate(3 220 150)"><rect x="110" y="132" width="150" height="40" rx="8" fill="#475569"/><text x="124" y="157">db_backup2.sql</text></g>
+<g transform="rotate(-2 120 210)"><rect x="40" y="190" width="150" height="40" rx="8" fill="#334155"/><text x="54" y="215">fix_FINAL_v3.php</text></g>
+<g transform="rotate(5 220 270)"><rect x="120" y="250" width="150" height="40" rx="8" fill="#475569"/><text x="134" y="275">??? no docs</text></g></g>
+<path d="M290 180h60" stroke="#93C5FD" stroke-width="4" stroke-linecap="round"/><path d="M340 168l14 12-14 12" stroke="#93C5FD" stroke-width="4" fill="none" stroke-linecap="round" stroke-linejoin="round"/>
+<rect x="380" y="80" width="220" height="220" rx="14" fill="#0F172A" stroke="#334155"/>
+<g font-family="Arial,sans-serif" font-size="15" fill="#fff">
+<circle cx="408" cy="120" r="10" fill="#1D4ED8"/><path d="M403 120l4 4 7-8" stroke="#fff" stroke-width="2.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/><text x="432" y="126">Code reviewed</text>
+<circle cx="408" cy="166" r="10" fill="#1D4ED8"/><path d="M403 166l4 4 7-8" stroke="#fff" stroke-width="2.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/><text x="432" y="172">Documented</text>
+<circle cx="408" cy="212" r="10" fill="#1D4ED8"/><path d="M403 212l4 4 7-8" stroke="#fff" stroke-width="2.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/><text x="432" y="218">Bugs fixed</text>
+<circle cx="408" cy="258" r="10" fill="#1D4ED8"/><path d="M403 258l4 4 7-8" stroke="#fff" stroke-width="2.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/><text x="432" y="264">Monthly support</text></g>
+</svg>

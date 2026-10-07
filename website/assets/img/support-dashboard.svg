@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 640 420" role="img" aria-labelledby="t"><title id="t">Monthly support overview showing completed and in-progress tasks</title>
+<rect width="640" height="420" rx="20" fill="#EFF6FF"/>
+<rect x="40" y="36" width="560" height="348" rx="14" fill="#fff" stroke="#CBD5E1"/>
+<g font-family="Arial,sans-serif">
+<text x="68" y="76" font-size="18" font-weight="700" fill="#0F172A">Monthly support</text>
+<text x="68" y="100" font-size="13" fill="#475569">Business plan</text>
+<text x="68" y="140" font-size="13" font-weight="600" fill="#334155">Hours this month</text>
+<rect x="68" y="152" width="504" height="14" rx="7" fill="#E2E8F0"/><rect x="68" y="152" width="372" height="14" rx="7" fill="#1D4ED8"/>
+<g font-size="15" fill="#0F172A">
+<circle cx="80" cy="206" r="11" fill="#DCFCE7"/><path d="M74 206l4 4 8-9" stroke="#15803D" stroke-width="2.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/><text x="104" y="212">Fix checkout bug</text><text x="540" y="212" font-size="13" fill="#15803D" text-anchor="end">Done</text>
+<circle cx="80" cy="250" r="11" fill="#DCFCE7"/><path d="M74 250l4 4 8-9" stroke="#15803D" stroke-width="2.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/><text x="104" y="256">Update plugins &amp; PHP version</text><text x="540" y="256" font-size="13" fill="#15803D" text-anchor="end">Done</text>
+<circle cx="80" cy="294" r="11" fill="#DCFCE7"/><path d="M74 294l4 4 8-9" stroke="#15803D" stroke-width="2.5" fill="none" stroke-linecap="round" stroke-linejoin="round"/><text x="104" y="300">Connect shipping API</text><text x="540" y="300" font-size="13" fill="#15803D" text-anchor="end">Done</text>
+<circle cx="80" cy="338" r="11" fill="#DBEAFE"/><circle cx="80" cy="338" r="4" fill="#1D4ED8"/><text x="104" y="344">New reporting module</text><text x="540" y="344" font-size="13" fill="#1D4ED8" text-anchor="end">In progress</text>
+</g></g>
+<rect x="472" y="56" width="104" height="40" rx="10" fill="#EFF6FF"/>
+<text x="524" y="81" font-family="Arial,sans-serif" font-size="13" font-weight="700" text-anchor="middle" fill="#1E40AF">Priority support</text>
+</svg>
