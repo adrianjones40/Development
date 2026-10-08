@@ -2054,7 +2054,7 @@ columnTemplate.strokeOpacity = 1;
         $r = 1;
 		?>
 		  <tr>
-           <td rowspan="<?php echo  $num_row ?>"><?php echo h($row['cust_name']); ?> </td>
+           <td rowspan="<?php echo max(1, (int) $num_row); ?>"><?php echo h($row['cust_name']); ?> </td>
 		<?php 
 		$fp_id_count=0;
 		$fev_id_count=0;
