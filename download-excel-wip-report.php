@@ -138,11 +138,13 @@ $query = "SELECT c.cust_name, wd.*, r.received_date, r.due_date" . $rev_extra . 
     (SELECT COUNT(id) FROM inw_conversion_project_dtl WHERE b_id = wd.id AND status IN ('Client_Delivery','Delivery')) AS ccount,
     (SELECT COUNT(id) FROM inw_conversion_project_dtl WHERE b_id = wd.id AND status NOT IN ('Client_Delivery','Delivery')) AS pcount,
     (SELECT COUNT(id) FROM inw_conversion_service_dtl WHERE b_id = wd.id AND status IN ('Client_Delivery','Delivery')) AS sccount,
-    (SELECT COUNT(id) FROM inw_conversion_service_dtl WHERE b_id = wd.id AND status NOT IN ('Client_Delivery','Delivery')) AS spcount " . $wip_from . $wip_where . " " . $order_by;
+    (SELECT COUNT(id) FROM inw_conversion_service_dtl WHERE b_id = wd.id AND status NOT IN ('Client_Delivery','Delivery')) AS spcount,
+    (SELECT GROUP_CONCAT(DISTINCT u.full_name SEPARATOR ', ') FROM inw_conversion_project_dtl chx JOIN users u ON u.id = chx.allocate_to WHERE chx.b_id = wd.id AND chx.status NOT IN ('Client_Delivery','Delivery')) AS alloc_names,
+    (SELECT MIN(chx.due_dt) FROM inw_conversion_project_dtl chx WHERE chx.b_id = wd.id AND chx.allocate_to IS NOT NULL AND chx.allocate_to <> '' AND chx.status NOT IN ('Client_Delivery','Delivery')) AS alloc_due " . $wip_from . $wip_where . " " . $order_by;
 
 $articles = dbq($query);
 $total_pages = $articles->num_rows;
-$show_alloc = (($_REQUEST['dep_id'] == '1' || $_REQUEST['dep_id'] == '2') && isset($conv_cols['assigned_user_id']));
+$show_alloc = ($_REQUEST['dep_id'] == '1' || $_REQUEST['dep_id'] == '2');
 
 /* ------------------------------ output (.xls) ------------------------------
    Headers are sent only now, after the queries, so a failure cannot corrupt the download.
@@ -188,10 +190,12 @@ header("Pragma: public");
 while ($row_history = $articles->fetch_assoc()) {
     list($recv_dt, $due_dt) = xls_dates($row_history);
 
-    $trans = dbq("SELECT u.full_name,t.current_status FROM `inw_conversion_project_transactions` as t,users as u WHERE t.process_user = u.id AND t.`project_id` = '" . (int) $row_history['id'] . "' AND t.created_dt > '2020-03-01'  AND t.current_status NOT IN ('Completed','Take Over') AND t.stage = '" . esc($row_history['stage']) . "' AND (t.id=(select id from `inw_conversion_project_transactions` where dept!=9 and `project_id` = '" . (int) $row_history['id'] . "' ORDER BY `id` DESC limit 1))  ORDER BY t.`id` DESC limit 1")->fetch_assoc();
-    $assign_comments = dbq("select comments from inw_conversion_project_transactions where project_id='" . (int) $row_history['id'] . "' and dept='14' and completion_status=6 order by id desc limit 1");
-    $res_ac = $assign_comments->fetch_assoc();
-    $assign_cepe = $show_alloc ? dbq_row("select full_name from users where id='" . (int) $row_history['assigned_user_id'] . "'") : array();
+    // transactions belong to the chapters (inw_conversion_project_dtl) of the project
+    $chapters = "SELECT ch.id FROM inw_conversion_project_dtl ch WHERE ch.b_id = " . (int) $row_history['id'];
+    $trans = dbq("SELECT u.full_name, t.current_status FROM inw_conversion_project_transactions t JOIN users u ON u.id = t.process_user
+        WHERE t.id = (SELECT MAX(t2.id) FROM inw_conversion_project_transactions t2 WHERE t2.project_id IN (" . $chapters . ") AND t2.dept != 9)
+        AND t.created_dt > '2020-03-01' AND t.current_status NOT IN ('Completed','Take Over') LIMIT 1")->fetch_assoc();
+    $res_ac = dbq("SELECT comments FROM inw_conversion_project_transactions WHERE project_id IN (" . $chapters . ") AND dept='14' AND completion_status=6 ORDER BY id DESC LIMIT 1")->fetch_assoc();
 
     // row colour (CSS classes do not exist in Excel, so use inline colours)
     $bg = '';
@@ -216,7 +220,7 @@ while ($row_history = $articles->fetch_assoc()) {
         <tr<?php echo $bg ? ' style="background-color:' . $bg . ';"' : ''; ?>>
             <td><?php echo h($row_history['cust_name']); ?></td>
             <td><?php echo h($row_history['book_short_name']); ?></td>
-            <td><?php echo h(isset($row_history['digital_type']) ? $row_history['digital_type'] : ''); ?></td>
+            <td><?php echo h(($row_history['digital_type'] != '') ? $row_history['digital_type'] : $row_history['book_work_type']); ?></td>
             <td><?php echo h($row_history['stage']); ?></td>
             <td><?php echo h(isset($row_history['manuscript_count']) ? $row_history['manuscript_count'] : ''); ?></td>
             <td><?php echo h(isset($row_history['fig']) ? $row_history['fig'] : ''); ?></td>
@@ -224,8 +228,8 @@ while ($row_history = $articles->fetch_assoc()) {
             <td><?php echo h(fmt_dt($recv_dt)); ?></td>
             <td><?php echo h(fmt_dt($due_dt)); ?></td>
             <?php if ($show_alloc) { ?>
-                <td><?php echo h(isset($assign_cepe['full_name']) ? $assign_cepe['full_name'] : ''); ?></td>
-                <td><?php echo h(fmt_dt(isset($row_history['ce_pe_due_date']) ? $row_history['ce_pe_due_date'] : '')); ?></td>
+                <td><?php echo h($row_history['alloc_names']); ?></td>
+                <td><?php echo h(fmt_dt($row_history['alloc_due'])); ?></td>
             <?php } ?>
             <td><?php echo (int) $row_history['ccount']; ?></td>
             <td><?php echo (int) $row_history['pcount']; ?></td>

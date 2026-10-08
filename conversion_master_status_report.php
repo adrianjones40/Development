@@ -100,27 +100,20 @@ function msr_cols($table) {
     return $cache[$table];
 }
 
-/* Column of inw_conversion_dtl that holds the client delivery date (first match), or '' when none exists. */
-function msr_delivery_col() {
-    $cols = msr_cols('inw_conversion_dtl');
-    foreach (array('sent_date', 'delivery_dt', 'delivered_dt', 'delivery_date', 'delivered_date', 'client_delivery_dt', 'completed_dt', 'completed_date') as $c) {
-        if (isset($cols[$c])) {
-            return $c;
-        }
-    }
-    return '';
-}
-
-/* Latest open transaction (user + status) of a project, plus the allocation comment, as label HTML. */
+/* Latest open transaction (user + status) over the chapters of a project (book), plus the allocation comment, as label HTML.
+   inw_conversion_project_transactions.project_id = inw_conversion_project_dtl.id (chapter), chapters belong to the book via b_id. */
 function msr_status_html($row, $with_comments) {
-    $id = (int) $row['id'];
+    $b = (int) $row['id'];
+    $chapters = "SELECT ch.id FROM inw_conversion_project_dtl ch WHERE ch.b_id = " . $b;
     $o = '<span class="label label-sm label-success">' . h($row['status']) . '</span>';
-    $t = dbq("SELECT u.full_name,t.current_status FROM `inw_conversion_project_transactions` as t,users as u WHERE t.process_user = u.id AND t.`project_id` = '" . $id . "' AND t.created_dt > '2020-03-01' AND t.current_status NOT IN ('Completed','Take Over') AND t.stage = '" . esc($row['stage']) . "' AND (t.id=(select id from `inw_conversion_project_transactions` where dept!=9 and `project_id` = '" . $id . "' ORDER BY `id` DESC limit 1)) ORDER BY t.`id` DESC limit 1")->fetch_assoc();
+    $t = dbq("SELECT u.full_name, t.current_status FROM inw_conversion_project_transactions t JOIN users u ON u.id = t.process_user
+        WHERE t.id = (SELECT MAX(t2.id) FROM inw_conversion_project_transactions t2 WHERE t2.project_id IN (" . $chapters . ") AND t2.dept != 9)
+        AND t.created_dt > '2020-03-01' AND t.current_status NOT IN ('Completed','Take Over') LIMIT 1")->fetch_assoc();
     if ($t) {
         $o .= '<span class="label label-sm label-info">' . h($t['full_name']) . '</span>|<span class="label label-sm label-warning">' . h($t['current_status']) . '</span>';
     }
     if ($with_comments) {
-        $c = dbq("select comments from inw_conversion_project_transactions where project_id='" . $id . "' and dept='14' and completion_status=6 order by id desc limit 1");
+        $c = dbq("SELECT comments FROM inw_conversion_project_transactions WHERE project_id IN (" . $chapters . ") AND dept='14' AND completion_status=6 ORDER BY id DESC LIMIT 1");
         if ($c->num_rows > 0) {
             $cr = $c->fetch_assoc();
             $o .= '|<span class="label label-sm label-danger">' . ($cr['comments'] != '' ? h($cr['comments']) : 'No Comments') . '</span>';
@@ -215,6 +208,7 @@ $search = $search1 = $search2 = $search3 = $search4 = '';
 $search_cd = $search_cm = $search_cy = $searchfp = '';
 $ccc = '';   // filters for journal tables (adm_journals aliased as j)
 $cccb = '';  // filters for inw_conversion_dtl (aliased as wd)
+$cccb_cust = '';  // customer filter only, for the dispatch table (aliased as wd)
 $otherParams = '';
 $i = $j = $k = $l = 0;
 $kg = $jg = $lg = 0;
@@ -224,13 +218,13 @@ $filePathKeys = array('radio', 'cust_id', 'j_id', 'stage_id', 'dep_id', 'dp_plat
 /* optional columns / delivery-date column of the conversion tables */
 $conv_cols = msr_cols('inw_conversion_dtl');
 $rev_cols = msr_cols('inw_conversion_revisions_dtl');
-$dcol = msr_delivery_col();
 
 /* ------------------------------ filters ------------------------------ */
 if ($_REQUEST['cust_id'] != "" && $_REQUEST['cust_id'] != 'all') {
     $f = "and wd.cust_id='" . esc($_REQUEST['cust_id']) . "' ";
     $ccc .= $f;
     $cccb .= $f;
+    $cccb_cust .= $f;
 }
 if ($_REQUEST['j_id'] != "" && $_REQUEST['j_id'] != 'all') {
     $ccc .= "and j.j_id='" . esc($_REQUEST['j_id']) . "' ";
@@ -271,17 +265,17 @@ if ($_REQUEST['radio'] == 'dp' || $_REQUEST['radio'] == 'cr') {
     if ($_REQUEST['from_dt'] != "" && $_REQUEST['date_wise'] == "d") {
         $frm = date('Y-m-d', strtotime($_REQUEST['from_dt']));
         $to = date('Y-m-d', strtotime($_REQUEST['to_dt']));
-        $search .= "and DATE_FORMAT(wd.{$dcol},'%Y-%m-%d') >='" . $frm . "' AND DATE_FORMAT(wd.{$dcol},'%Y-%m-%d')<='" . $to . "'";
+        $search .= "and DATE_FORMAT(wd.sent_date,'%Y-%m-%d') >='" . $frm . "' AND DATE_FORMAT(wd.sent_date,'%Y-%m-%d')<='" . $to . "'";
     }
     if ($_REQUEST['date_wise'] == "m") {
-        $search .= "and DATE_FORMAT(wd.{$dcol},'%m-%Y')='" . esc($_REQUEST['mfrom_dt']) . "'";
+        $search .= "and DATE_FORMAT(wd.sent_date,'%m-%Y')='" . esc($_REQUEST['mfrom_dt']) . "'";
     }
     if ($_REQUEST['date_wise'] == "y") {
-        $search .= "and DATE_FORMAT(wd.{$dcol},'%Y')='" . esc($_REQUEST['yfrom_dt']) . "'";
+        $search .= "and DATE_FORMAT(wd.sent_date,'%Y')='" . esc($_REQUEST['yfrom_dt']) . "'";
     }
     if ($_REQUEST['date_wise'] != "y" && $_REQUEST['date_wise'] != "m" && $_REQUEST['date_wise'] != "d") {
-        $search3 .= "AND wd.{$dcol} >='2020-03-01'";
-        $search4 .= "AND wd.{$dcol} >='2020-03-01'";
+        $search3 .= "AND wd.sent_date >='2020-03-01'";
+        $search4 .= "AND wd.sent_date >='2020-03-01'";
     }
 } elseif ($_REQUEST['radio'] == 'sfd') {
     if ($_REQUEST['sdf_dt'] != "") {
@@ -808,7 +802,9 @@ font-size: x-large;
 															(SELECT COUNT(id) FROM inw_conversion_project_dtl WHERE b_id = wd.id AND status IN ('Client_Delivery','Delivery')) AS ccount,
 															(SELECT COUNT(id) FROM inw_conversion_project_dtl WHERE b_id = wd.id AND status NOT IN ('Client_Delivery','Delivery')) AS pcount,
 															(SELECT COUNT(id) FROM inw_conversion_service_dtl WHERE b_id = wd.id AND status IN ('Client_Delivery','Delivery')) AS sccount,
-															(SELECT COUNT(id) FROM inw_conversion_service_dtl WHERE b_id = wd.id AND status NOT IN ('Client_Delivery','Delivery')) AS spcount " . $wip_from . $wip_where;
+															(SELECT COUNT(id) FROM inw_conversion_service_dtl WHERE b_id = wd.id AND status NOT IN ('Client_Delivery','Delivery')) AS spcount,
+															(SELECT GROUP_CONCAT(DISTINCT u.full_name SEPARATOR ', ') FROM inw_conversion_project_dtl chx JOIN users u ON u.id = chx.allocate_to WHERE chx.b_id = wd.id AND chx.status NOT IN ('Client_Delivery','Delivery')) AS alloc_names,
+															(SELECT MIN(chx.due_dt) FROM inw_conversion_project_dtl chx WHERE chx.b_id = wd.id AND chx.allocate_to IS NOT NULL AND chx.allocate_to <> '' AND chx.status NOT IN ('Client_Delivery','Delivery')) AS alloc_due " . $wip_from . $wip_where;
 														$cnt_query = "SELECT COUNT(wd.id) as num " . $wip_from . $wip_where;
 														$page_count = dbq($cnt_query)->fetch_assoc();
 														$total_pages = isset($page_count['num']) ? (int) $page_count['num'] : 0;
@@ -818,7 +814,7 @@ font-size: x-large;
 														$filePath = $self . '?page=1&' . msr_qs($filePathKeys);
 														$limit = 10; //how many items to show per page
 														$articles = dbq($query . " " . $order_by . " LIMIT $start, $limit");
-														$show_alloc = (($_REQUEST['dep_id'] == '1' || $_REQUEST['dep_id'] == '2') && isset($conv_cols['assigned_user_id']));
+														$show_alloc = ($_REQUEST['dep_id'] == '1' || $_REQUEST['dep_id'] == '2');
                                                     ?>
 														<div class="page-header">
                                                             <h1>WIP Report <b style="color:red;font-size:14px;"> - Total count :<?php echo $total_pages;?></b> <a href="download-excel-wip-report.php?<?php echo h(msr_qs(array('cust_id', 'j_id', 'stage_id', 'dep_id', 'radio'))); ?>" class="btn btn-primary">Download Excel </a></h1>
@@ -848,7 +844,6 @@ font-size: x-large;
 <?php
 while ($row_history = $articles->fetch_assoc()) {
 	list($recv_dt, $due_dt) = msr_dates($row_history);
-	$assign_cepe = $show_alloc ? dbq_row("select full_name from users where id='" . (int) $row_history['assigned_user_id'] . "'") : array();
 
 	$due_ts = $due_dt ? strtotime($due_dt) : false;
 	$tr_class = '';
@@ -863,7 +858,7 @@ while ($row_history = $articles->fetch_assoc()) {
                                                                         <tr class="<?php echo $tr_class; ?>">
                                                                             <td><?php echo h($row_history['cust_name']); ?></td>
                                                                             <td><?php echo h($row_history['book_short_name']); ?></td>
-                                                                            <td><?php echo h(isset($row_history['digital_type']) ? $row_history['digital_type'] : ''); ?></td>
+                                                                            <td><?php echo h(($row_history['digital_type'] != '') ? $row_history['digital_type'] : $row_history['book_work_type']); ?></td>
                                                                             <td><?php echo h($row_history['stage']); ?></td>
                                                                             <td><?php echo h(isset($row_history['manuscript_count']) ? $row_history['manuscript_count'] : ''); ?></td>
                                                                             <td><?php echo h(isset($row_history['fig']) ? $row_history['fig'] : ''); ?></td>
@@ -871,8 +866,8 @@ while ($row_history = $articles->fetch_assoc()) {
                                                                             <td><?php echo fmt_dt($recv_dt); ?></td>
                                                                             <td><?php echo fmt_dt($due_dt); ?></td>
                                                                             <?php if ($show_alloc) { ?>
-                                                                                <td><?php echo h(isset($assign_cepe['full_name']) ? $assign_cepe['full_name'] : ''); ?></td>
-                                                                                <td><?php echo fmt_dt(isset($row_history['ce_pe_due_date']) ? $row_history['ce_pe_due_date'] : ''); ?></td>
+                                                                                <td><?php echo h($row_history['alloc_names']); ?></td>
+                                                                                <td><?php echo fmt_dt($row_history['alloc_due']); ?></td>
                                                                             <?php } ?>
                                                                             <td><?php echo (int) $row_history['ccount']; ?></td>
                                                                             <td><?php echo (int) $row_history['pcount']; ?></td>
@@ -1009,19 +1004,20 @@ $cons_t = array(0, 0, 0);
 ?>
 <?php
 													if ($_REQUEST['radio']=='dp') {
-														if ($dcol == '') {
-?>
-<div class="alert alert-warning" style="margin-top:15px;"><b>Delivery Performance needs the delivery date column of <code>inw_conversion_dtl</code>.</b> None of the expected columns (<code>sent_date, delivery_dt, delivered_dt, delivery_date, delivered_date, client_delivery_dt, completed_dt, completed_date</code>) exists. Run <code>debug_master_status_report.php</code> to see the table's columns, then tell me which one holds the client delivery date.</div>
-<?php
-														} else {
-															$dexpr = "wd." . $dcol;
-															$dp_from = "FROM inw_conversion_dtl wd JOIN adm_customer_master c ON wd.cust_id = c.id
-																LEFT JOIN inw_conversion_revisions_dtl r ON (wd.`id` = r.`b_id` AND r.r_id = (SELECT MAX(r2.r_id) FROM inw_conversion_revisions_dtl r2 WHERE r2.b_id = wd.`id`))
-																WHERE wd.status IN ('Client_Delivery','Delivery','Client Review','Completed') $cccb $search $search2 $search4";
-															$due_expr = "IF(wd.stage LIKE 'REV%' AND r.due_date IS NOT NULL, r.due_date, wd.due_dt)";
+														// dispatch rows -> chapter (a_id = inw_conversion_project_dtl.id) -> book; falls back to a_id = book id
+														$rev_match = isset($rev_cols['revision_count']) ? " AND rv.revision_count = REPLACE(wd.stage, 'REV', '')" : '';
+														$rv_due = "(SELECT rv.due_date FROM inw_conversion_revisions_dtl rv WHERE rv.b_id = bk.id AND wd.stage LIKE 'REV%'" . $rev_match . " ORDER BY rv.r_id DESC LIMIT 1)";
+														$rv_recv = "(SELECT rv.received_date FROM inw_conversion_revisions_dtl rv WHERE rv.b_id = bk.id AND wd.stage LIKE 'REV%'" . $rev_match . " ORDER BY rv.r_id DESC LIMIT 1)";
+														$due_expr = "COALESCE($rv_due, ch.due_dt, bk.due_dt)";
+														$recv_expr = "COALESCE($rv_recv, ch.recv_dt, bk.recv_dt)";
+														$dp_from = "FROM inw_otp_dispatch_history wd
+															JOIN adm_customer_master c ON wd.cust_id = c.id
+															LEFT JOIN inw_conversion_project_dtl ch ON ch.id = wd.a_id
+															LEFT JOIN inw_conversion_dtl bk ON bk.id = COALESCE(ch.b_id, wd.a_id)
+															WHERE 1 $cccb_cust $search $search2 $search4";
 
-															// dispatched count per customer
-															$per_cust = dbq("SELECT c.cust_name, c.font_color, COUNT(wd.id) AS sent_count " . $dp_from . " GROUP BY c.id, c.cust_name, c.font_color ORDER BY c.cust_name");
+														// dispatched count per customer
+														$per_cust = dbq("SELECT c.cust_name, c.font_color, COUNT(wd.idh_id) AS sent_count " . $dp_from . " GROUP BY c.id, c.cust_name, c.font_color ORDER BY c.cust_name");
 ?>
 													<table class="table table-striped table-bordered table-hover">
       <tbody>
@@ -1035,18 +1031,26 @@ $cons_t = array(0, 0, 0);
       </tbody>
     </table>
 <?php
-															// totals for the charts
-															$tot = dbq("SELECT COUNT(*) AS total, COALESCE(SUM(DATE(sentdt) < DATE(due)),0) AS ahead, COALESCE(SUM(DATE(sentdt) = DATE(due)),0) AS ontime, COALESCE(SUM(DATE(sentdt) > DATE(due)),0) AS delay FROM (SELECT $dexpr AS sentdt, $due_expr AS due " . $dp_from . ") x")->fetch_assoc();
-															$total_pages = (int) $tot['total'];
-															$ahead = (int) $tot['ahead'];
-															$ontime = (int) $tot['ontime'];
-															$delay = (int) $tot['delay'];
-															$k = $ahead; $l = $ontime; $j = $delay;
+														// totals for the charts
+														$tot = dbq("SELECT COUNT(*) AS total, COALESCE(SUM(DATE(sentdt) < DATE(due)),0) AS ahead, COALESCE(SUM(DATE(sentdt) = DATE(due)),0) AS ontime, COALESCE(SUM(DATE(sentdt) > DATE(due)),0) AS delay FROM (SELECT wd.sent_date AS sentdt, $due_expr AS due " . $dp_from . ") x")->fetch_assoc();
+														$total_pages = (int) $tot['total'];
+														$ahead = (int) $tot['ahead'];
+														$ontime = (int) $tot['ontime'];
+														$delay = (int) $tot['delay'];
+														$k = $ahead; $l = $ontime; $j = $delay;
 
-															$start = max(0, (int) $_REQUEST['start']);
-															$filePath = $self . '?page=1&' . msr_qs($filePathKeys);
-															$limit = 10; //how many items to show per page
-															$articles = dbq("SELECT wd.id, wd.book_short_name, wd.stage, wd.recv_dt, wd.due_dt, wd.manuscript_count, wd.digital_type, c.cust_name, r.received_date, r.due_date, $dexpr AS sent_date " . $dp_from . " ORDER BY wd.id DESC LIMIT $start, $limit");
+														$start = max(0, (int) $_REQUEST['start']);
+														$filePath = $self . '?page=1&' . msr_qs($filePathKeys);
+														$limit = 10; //how many items to show per page
+														$articles = dbq("SELECT wd.idh_id, wd.stage, wd.sent_date, c.cust_name, bk.id AS book_id, bk.book_short_name, ch.chapter_title,
+																COALESCE(NULLIF(bk.digital_type, ''), bk.book_work_type) AS work_type,
+																COALESCE(ch.manuscript_count, bk.manuscript_count) AS pages,
+																$recv_expr AS recv, $due_expr AS due " . $dp_from . " ORDER BY wd.idh_id DESC LIMIT $start, $limit");
+														if ($total_pages == 0) {
+?>
+<div class="alert alert-info" style="margin-top:15px;">No dispatch records found in <code>inw_otp_dispatch_history</code> for this selection.</div>
+<?php
+														}
 ?>
 														<div class="page-header">
                                                             <h1>Delivery Performance Report <b style="color:red;font-size:14px;"> - Total count :<?php echo $total_pages; ?></b> <a href="download-excel-dp-report.php?<?php echo h(msr_qs(array('cust_id', 'j_id', 'stage_id', 'radio', 'from_dt', 'to_dt', 'mfrom_dt', 'yfrom_dt', 'date_wise'))); ?>" class="btn btn-primary">Download Excel </a></h1>
@@ -1057,6 +1061,7 @@ $cons_t = array(0, 0, 0);
                                                             <tr>
                                                             <th>Client</th>
                                                             <th>Project Name</th>
+                                                            <th>Chapter</th>
                                                             <th>Work Type</th>
                                                             <th>Stage</th>
                                                             <th>Received Date</th>
@@ -1070,9 +1075,8 @@ $cons_t = array(0, 0, 0);
                                                             <tbody id="tbl1Body">
 <?php
 while ($row_history = $articles->fetch_assoc()) {
-	list($recv_dt, $due_dt) = msr_dates($row_history);
 	$sent_ts = $row_history['sent_date'] ? strtotime(date('Y-m-d', strtotime($row_history['sent_date']))) : false;
-	$due_ts = $due_dt ? strtotime(date('Y-m-d', strtotime($due_dt))) : false;
+	$due_ts = $row_history['due'] ? strtotime(date('Y-m-d', strtotime($row_history['due']))) : false;
 	if (!$sent_ts || !$due_ts) {
 		$sched = '-';
 	} elseif ($sent_ts == $due_ts) {
@@ -1086,14 +1090,15 @@ while ($row_history = $articles->fetch_assoc()) {
                                                                         <tr>
                                                                             <td><?php echo h($row_history['cust_name']); ?></td>
                                                                             <td><?php echo h($row_history['book_short_name']); ?></td>
-                                                                            <td><?php echo h($row_history['digital_type']); ?></td>
+                                                                            <td><?php echo h($row_history['chapter_title']); ?></td>
+                                                                            <td><?php echo h($row_history['work_type']); ?></td>
                                                                             <td><?php echo h($row_history['stage']); ?></td>
-                                                                            <td><?php echo fmt_dt($recv_dt); ?></td>
-                                                                            <td><?php echo fmt_dt($due_dt); ?></td>
+                                                                            <td><?php echo fmt_dt($row_history['recv']); ?></td>
+                                                                            <td><?php echo fmt_dt($row_history['due']); ?></td>
                                                                             <td><?php echo fmt_dt($row_history['sent_date']); ?></td>
-                                                                            <td><?php echo h($row_history['manuscript_count']); ?></td>
+                                                                            <td><?php echo h($row_history['pages']); ?></td>
                                                                             <td><?php echo $sched; ?></td>
-                                                                            <td><a title="Project details" href="show_conversion_projects.php?id=<?php echo (int) $row_history['id']; ?>" target="_blank" class="btn btn-xs btn-info"><i class="ace-icon fa fa-clock-o bigger-120"></i></a></td>
+                                                                            <td><?php if ($row_history['book_id']) { ?><a title="Project details" href="show_conversion_projects.php?id=<?php echo (int) $row_history['book_id']; ?>" target="_blank" class="btn btn-xs btn-info"><i class="ace-icon fa fa-clock-o bigger-120"></i></a><?php } ?></td>
                                                                         </tr>
 <?php } ?>
 <?php if ($total_pages > $limit) { ?>
@@ -1101,7 +1106,7 @@ while ($row_history = $articles->fetch_assoc()) {
             <td colspan="4">
             <div class="col-xs-12"><div class="dataTables_info" id="dynamic-table_info" role="status" aria-live="polite">Showing <?php echo ($start+1); ?> to <?php echo ($start+$limit > $total_pages) ? $total_pages : $start+$limit; ?> of <?php echo $total_pages; ?> entries</div></div>
             </td>
-					<td align="center" colspan="6" class="inactive"><div class="dataTables_paginate paging_simple_numbers" id="datatable_paginate">
+					<td align="center" colspan="7" class="inactive"><div class="dataTables_paginate paging_simple_numbers" id="datatable_paginate">
             <ul class="pagination">
               <?php paginate($start,$limit,$total_pages,$filePath,$otherParams); ?>
             </ul>
@@ -1300,38 +1305,27 @@ columnTemplate.strokeOpacity = 1;
 
 }); // end am4core.ready()
 </script>
-
-
 <?php
-														}
 													}
 ?>
 
-													
-
-														 
-                                                    </div> 
-													
-		<?php if ($_REQUEST['radio']=='cr') { ?>
+<?php if ($_REQUEST['radio']=='cr') {
+	$cr_res = dbq("SELECT c.id, c.cust_name,
+			COALESCE(SUM(wd.stage = 'FP'), 0) AS fp_count, COALESCE(SUM(wd.stage LIKE 'REV%'), 0) AS rev_count, COALESCE(SUM(wd.stage LIKE 'FIN%'), 0) AS fin_count
+		FROM inw_otp_dispatch_history wd JOIN adm_customer_master c ON wd.cust_id = c.id
+		WHERE 1 $cccb_cust $search $search2 $search4
+		GROUP BY c.id, c.cust_name ORDER BY c.cust_name");
+	$cr_t = array(0, 0, 0);
+?>
 <div id="consolidated-report-tables" >
                                                         <div class="page-header">
                                                             <h1>Consolidated-Report</h1>
                                                         </div>
-<?php if ($dcol == '') { ?>
-<div class="alert alert-warning" style="margin:15px 0 0 160px;width:70%;"><b>This report needs the delivery date column of <code>inw_conversion_dtl</code>.</b> None of the expected columns (<code>sent_date, delivery_dt, delivered_dt, delivery_date, delivered_date, client_delivery_dt, completed_dt, completed_date</code>) exists. Run <code>debug_master_status_report.php</code> to see the table's columns, then tell me which one holds the client delivery date.</div>
-<?php } else {
-	$cr_res = dbq("SELECT c.id, c.cust_name,
-			SUM(wd.stage = 'FP') AS fp_count, SUM(wd.stage LIKE 'REV%') AS rev_count, SUM(wd.stage LIKE 'FIN%') AS fin_count
-		FROM inw_conversion_dtl wd JOIN adm_customer_master c ON wd.cust_id = c.id
-		WHERE wd.status IN ('Client_Delivery','Delivery','Client Review','Completed') $cccb $search $search2 $search4
-		GROUP BY c.id, c.cust_name ORDER BY c.cust_name");
-	$cr_t = array(0, 0, 0);
-?>
                                                         <table id="consolidated-report-table" class="table table-striped table-bordered table-hover " style="width: 70%; margin-top: 30px; margin-left: 160px;">
                                                             <thead>
                                                                 <tr>
                                                                     <th rowspan="2">Customer</th>
-                                                                    <th colspan="3">Stages</th>
+                                                                    <th colspan="3">Stages (dispatches)</th>
                                                                 </tr>
                                                                 <tr>
                                                                     <th>FP</th>
@@ -1360,7 +1354,6 @@ columnTemplate.strokeOpacity = 1;
                                                                 </tr>
                                                             </tbody>
                                                         </table>
-<?php } ?>
 </div>
 <?php } ?>
 
@@ -1498,9 +1491,7 @@ $send_date =$tds;
 				}
 				else
 				{
-					$cnt_row = (isset($conv_cols['assigned_user_id']) && isset($conv_cols['ce_pe_due_date']))
-						? dbq("SELECT COUNT(wd.id) as num FROM `inw_conversion_dtl` as wd WHERE wd.assigned_user_id='".(int)$row_users['id']."' and DATE_FORMAT(wd.ce_pe_due_date,'%Y-%m-%d')='".$ce_day."' ")->fetch_assoc()
-						: array('num' => '-');
+					$cnt_row = dbq("SELECT COUNT(ch.id) as num FROM `inw_conversion_project_dtl` as ch WHERE ch.allocate_to='".(int)$row_users['id']."' AND ch.due_dt = '".$ce_day."' AND ch.status NOT IN ('Client_Delivery','Delivery') ")->fetch_assoc();
 					echo '<a href="assigned-work-list.php?uid='.(int)$row_users['id'].'&pdate='.urlencode($ce_day).'" target="_blank">'.h($cnt_row['num']).'</a>';
 				}
 				echo '</td>';
