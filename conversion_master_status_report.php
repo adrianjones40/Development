@@ -1411,7 +1411,10 @@ $customers = dbq($cnt_query);
 
 												
                                                     ?>   
-														<div class="page-header">
+														<?php if ($total_pages == 0) { ?>
+<div class="alert alert-warning" style="margin-top:15px;">No delivery records found. <b>Delivery Performance still reads the journal dispatch tables</b> (<code>inw_dispatch_history</code> / <code>adm_journals</code>), not the book tables, so it stays empty until it is pointed at the book dispatch table. Run <code>debug_master_status_report.php</code> (section 5) to check.</div>
+<?php } ?>
+<div class="page-header">
                                                             <h1>Delivery Performance Report <b style="color:red;font-size:14px;"> - Total count :<?php echo $total_pages;?></b> <a href="download-excel-dp-report.php?<?php echo h(msr_qs(array('cust_id', 'j_id', 'stage_id', 'dp_platform', 'radio', 'from_dt', 'to_dt', 'mfrom_dt', 'yfrom_dt', 'date_wise'))); ?>" class="btn btn-primary">Download Excel </a></h1>
                                                         </div>
                                                     <div class="myTable1">
@@ -2130,7 +2133,10 @@ columnTemplate.strokeOpacity = 1;
                                                                                 </tr>
                                                             </tbody>
                                                         </table>
-                                                    </div>
+                                                    <?php if (($tfp_id_count + $tfev_id_count + $tfin_id_count) == 0) { ?>
+<div class="alert alert-warning" style="margin:15px 0 0 160px;width:70%;">No records found. <b>This Consolidated report still reads the journal dispatch tables</b> (<code>inw_dispatch_history</code> / <code>adm_journals</code>), not the book tables, so it stays empty until it is pointed at the book dispatch table. Run <code>debug_master_status_report.php</code> (section 4) to check.</div>
+<?php } ?>
+</div>
 													<?php }?>
                                                   
 												  
