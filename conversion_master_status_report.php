@@ -1004,16 +1004,14 @@ $cons_t = array(0, 0, 0);
 ?>
 <?php
 													if ($_REQUEST['radio']=='dp') {
-														// dispatch rows -> chapter (a_id = inw_conversion_project_dtl.id) -> book; falls back to a_id = book id
-														$rev_match = isset($rev_cols['revision_count']) ? " AND rv.revision_count = REPLACE(wd.stage, 'REV', '')" : '';
-														$rv_due = "(SELECT rv.due_date FROM inw_conversion_revisions_dtl rv WHERE rv.b_id = bk.id AND wd.stage LIKE 'REV%'" . $rev_match . " ORDER BY rv.r_id DESC LIMIT 1)";
-														$rv_recv = "(SELECT rv.received_date FROM inw_conversion_revisions_dtl rv WHERE rv.b_id = bk.id AND wd.stage LIKE 'REV%'" . $rev_match . " ORDER BY rv.r_id DESC LIMIT 1)";
-														$due_expr = "COALESCE($rv_due, ch.due_dt, bk.due_dt)";
-														$recv_expr = "COALESCE($rv_recv, ch.recv_dt, bk.recv_dt)";
-														$dp_from = "FROM inw_otp_dispatch_history wd
+														// dispatch rows -> book (b_id) and, for revisions, the revision row (r_id)
+														$due_expr = "COALESCE(rv.due_date, bk.due_dt)";
+														$recv_expr = "COALESCE(rv.received_date, bk.recv_dt)";
+														$pages_expr = isset($rev_cols['correction_pages']) ? "COALESCE(rv.correction_pages, bk.manuscript_count)" : "bk.manuscript_count";
+														$dp_from = "FROM inw_conversion_dispatch_history wd
 															JOIN adm_customer_master c ON wd.cust_id = c.id
-															LEFT JOIN inw_conversion_project_dtl ch ON ch.id = wd.a_id
-															LEFT JOIN inw_conversion_dtl bk ON bk.id = COALESCE(ch.b_id, wd.a_id)
+															LEFT JOIN inw_conversion_dtl bk ON bk.id = wd.b_id
+															LEFT JOIN inw_conversion_revisions_dtl rv ON rv.r_id = wd.r_id
 															WHERE 1 $cccb_cust $search $search2 $search4";
 
 														// dispatched count per customer
@@ -1042,13 +1040,13 @@ $cons_t = array(0, 0, 0);
 														$start = max(0, (int) $_REQUEST['start']);
 														$filePath = $self . '?page=1&' . msr_qs($filePathKeys);
 														$limit = 10; //how many items to show per page
-														$articles = dbq("SELECT wd.idh_id, wd.stage, wd.sent_date, c.cust_name, bk.id AS book_id, bk.book_short_name, ch.chapter_title,
+														$articles = dbq("SELECT wd.idh_id, wd.stage, wd.sent_date, c.cust_name, bk.id AS book_id, bk.book_short_name,
 																COALESCE(NULLIF(bk.digital_type, ''), bk.book_work_type) AS work_type,
-																COALESCE(ch.manuscript_count, bk.manuscript_count) AS pages,
+																$pages_expr AS pages,
 																$recv_expr AS recv, $due_expr AS due " . $dp_from . " ORDER BY wd.idh_id DESC LIMIT $start, $limit");
 														if ($total_pages == 0) {
 ?>
-<div class="alert alert-info" style="margin-top:15px;">No dispatch records found in <code>inw_otp_dispatch_history</code> for this selection.</div>
+<div class="alert alert-info" style="margin-top:15px;">No dispatch records found in <code>inw_conversion_dispatch_history</code> for this selection.</div>
 <?php
 														}
 ?>
@@ -1061,7 +1059,6 @@ $cons_t = array(0, 0, 0);
                                                             <tr>
                                                             <th>Client</th>
                                                             <th>Project Name</th>
-                                                            <th>Chapter</th>
                                                             <th>Work Type</th>
                                                             <th>Stage</th>
                                                             <th>Received Date</th>
@@ -1090,7 +1087,6 @@ while ($row_history = $articles->fetch_assoc()) {
                                                                         <tr>
                                                                             <td><?php echo h($row_history['cust_name']); ?></td>
                                                                             <td><?php echo h($row_history['book_short_name']); ?></td>
-                                                                            <td><?php echo h($row_history['chapter_title']); ?></td>
                                                                             <td><?php echo h($row_history['work_type']); ?></td>
                                                                             <td><?php echo h($row_history['stage']); ?></td>
                                                                             <td><?php echo fmt_dt($row_history['recv']); ?></td>
@@ -1106,7 +1102,7 @@ while ($row_history = $articles->fetch_assoc()) {
             <td colspan="4">
             <div class="col-xs-12"><div class="dataTables_info" id="dynamic-table_info" role="status" aria-live="polite">Showing <?php echo ($start+1); ?> to <?php echo ($start+$limit > $total_pages) ? $total_pages : $start+$limit; ?> of <?php echo $total_pages; ?> entries</div></div>
             </td>
-					<td align="center" colspan="7" class="inactive"><div class="dataTables_paginate paging_simple_numbers" id="datatable_paginate">
+					<td align="center" colspan="6" class="inactive"><div class="dataTables_paginate paging_simple_numbers" id="datatable_paginate">
             <ul class="pagination">
               <?php paginate($start,$limit,$total_pages,$filePath,$otherParams); ?>
             </ul>
@@ -1312,7 +1308,7 @@ columnTemplate.strokeOpacity = 1;
 <?php if ($_REQUEST['radio']=='cr') {
 	$cr_res = dbq("SELECT c.id, c.cust_name,
 			COALESCE(SUM(wd.stage = 'FP'), 0) AS fp_count, COALESCE(SUM(wd.stage LIKE 'REV%'), 0) AS rev_count, COALESCE(SUM(wd.stage LIKE 'FIN%'), 0) AS fin_count
-		FROM inw_otp_dispatch_history wd JOIN adm_customer_master c ON wd.cust_id = c.id
+		FROM inw_conversion_dispatch_history wd JOIN adm_customer_master c ON wd.cust_id = c.id
 		WHERE 1 $cccb_cust $search $search2 $search4
 		GROUP BY c.id, c.cust_name ORDER BY c.cust_name");
 	$cr_t = array(0, 0, 0);

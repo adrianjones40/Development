@@ -79,7 +79,7 @@ $required = array(
     'inw_conversion_project_dtl' => array('id', 'b_id', 'cust_id', 'chapter_title', 'recv_dt', 'due_dt', 'manuscript_count', 'stage', 'status', 'allocate_to', 'department_id', 'created_dt'),
     'inw_conversion_service_dtl' => array('id', 'b_id', 'status'),
     'inw_conversion_project_transactions' => array('id', 'project_id', 'dept', 'stage', 'current_status', 'process_user', 'completion_status', 'comments', 'created_dt'),
-    'inw_otp_dispatch_history' => array('idh_id', 'cust_id', 'j_id', 'a_id', 'stage', 'dispatch_type', 'sent_date'),
+    'inw_conversion_dispatch_history' => array('idh_id', 'cust_id', 'b_id', 'r_id', 'stage', 'dispatch_type', 'sent_date'),
     'adm_customer_master' => array('id', 'cust_id', 'cust_name', 'font_color'),
     'adm_dept_master' => array('dept_name', 'dept_code', 'parent_id'),
     'users' => array('id', 'full_name', 'approved', 'department_id'),
@@ -97,7 +97,7 @@ $queries = array(
     'Schedules - FP' => "SELECT wd.id, wd.cust_id, wd.status, wd.due_dt, wd.recv_dt, wd.book_short_name, wd.stage FROM inw_conversion_dtl as wd WHERE wd.stage='FP' LIMIT 1",
     'Schedules - REV/FIN' => "SELECT wd.id, r.due_date, r.received_date FROM inw_conversion_dtl as wd LEFT JOIN inw_conversion_revisions_dtl as r ON wd.id = r.b_id WHERE wd.stage LIKE 'REV%' GROUP BY r.b_id LIMIT 1",
     'Transactions (via chapters)' => "SELECT u.full_name, t.current_status, t.id FROM inw_conversion_project_transactions t JOIN users u ON u.id = t.process_user JOIN inw_conversion_project_dtl ch ON ch.id = t.project_id LIMIT 1",
-    'Dispatch history' => "SELECT wd.idh_id, wd.stage, wd.sent_date, c.cust_name FROM inw_otp_dispatch_history wd JOIN adm_customer_master c ON wd.cust_id = c.id LIMIT 1",
+    'Dispatch history' => "SELECT wd.idh_id, wd.stage, wd.sent_date, c.cust_name FROM inw_conversion_dispatch_history wd JOIN adm_customer_master c ON wd.cust_id = c.id LIMIT 1",
     'CE/PE allotment' => "SELECT COUNT(aau_id) AS total_count FROM assigned_article_user LIMIT 1",
 );
 
@@ -250,44 +250,42 @@ dbg_show('4a. Consolidated - open conversion projects (the table under the WIP r
 $cust_d = ($flt['cust_id'] !== 'all') ? " AND wd.cust_id = '" . esc($flt['cust_id']) . "' " : '';
 dbg_show('4b. Consolidated - dispatches by customer and stage (radio "Consolidated-report")', dbg_run("SELECT c.cust_name,
         COALESCE(SUM(wd.stage = 'FP'),0) AS FP, COALESCE(SUM(wd.stage LIKE 'REV%'),0) AS REV, COALESCE(SUM(wd.stage LIKE 'FIN%'),0) AS FIN
-    FROM inw_otp_dispatch_history wd JOIN adm_customer_master c ON wd.cust_id = c.id
+    FROM inw_conversion_dispatch_history wd JOIN adm_customer_master c ON wd.cust_id = c.id
     WHERE 1 $cust_d $search GROUP BY c.id, c.cust_name ORDER BY c.cust_name"), 200);
 ?>
 
 <h2>5. Delivery Performance</h2>
-<p>Uses the same filters as section 4 (dispatch date = <code>inw_otp_dispatch_history.sent_date</code>).</p>
+<p>Uses the same filters as section 4 (dispatch date = <code>inw_conversion_dispatch_history.sent_date</code>).</p>
 <?php
-$rev_cols_present = array();
-$rr = $db->query("SHOW COLUMNS FROM inw_conversion_revisions_dtl");
-while ($rr && ($x = $rr->fetch_assoc())) { $rev_cols_present[strtolower($x['Field'])] = true; }
-$rev_match = isset($rev_cols_present['revision_count']) ? " AND rv.revision_count = REPLACE(wd.stage, 'REV', '')" : '';
-$rv_due = "(SELECT rv.due_date FROM inw_conversion_revisions_dtl rv WHERE rv.b_id = bk.id AND wd.stage LIKE 'REV%'$rev_match ORDER BY rv.r_id DESC LIMIT 1)";
-$due_expr = "COALESCE($rv_due, ch.due_dt, bk.due_dt)";
-$dp_from = "FROM inw_otp_dispatch_history wd
+$due_expr = "COALESCE(rv.due_date, bk.due_dt)";
+$dp_from = "FROM inw_conversion_dispatch_history wd
     JOIN adm_customer_master c ON wd.cust_id = c.id
-    LEFT JOIN inw_conversion_project_dtl ch ON ch.id = wd.a_id
-    LEFT JOIN inw_conversion_dtl bk ON bk.id = COALESCE(ch.b_id, wd.a_id)
+    LEFT JOIN inw_conversion_dtl bk ON bk.id = wd.b_id
+    LEFT JOIN inw_conversion_revisions_dtl rv ON rv.r_id = wd.r_id
     WHERE 1 $cust_d $search";
 dbg_show('5a. Dispatched count per customer', dbg_run("SELECT c.cust_name, COUNT(wd.idh_id) AS sent_count $dp_from GROUP BY c.id, c.cust_name ORDER BY c.cust_name"), 200);
 dbg_show('5b. Schedule totals (Ahead / On time / Delay) - feeds the chart', dbg_run("SELECT COUNT(*) AS total,
         COALESCE(SUM(DATE(sentdt) < DATE(due)),0) AS Ahead, COALESCE(SUM(DATE(sentdt) = DATE(due)),0) AS On_time,
         COALESCE(SUM(DATE(sentdt) > DATE(due)),0) AS Delay, COALESCE(SUM(due IS NULL),0) AS no_due_date_found
     FROM (SELECT wd.sent_date AS sentdt, $due_expr AS due $dp_from) x"));
-dbg_show('5c. Latest 20 rows of the report table', dbg_run("SELECT wd.idh_id, c.cust_name, bk.book_short_name AS project, ch.chapter_title AS chapter, wd.stage,
+dbg_show('5c. Latest 20 rows of the report table', dbg_run("SELECT wd.idh_id, c.cust_name, bk.book_short_name AS project, wd.stage,
         DATE(wd.sent_date) AS dispatched, DATE($due_expr) AS due,
         CASE WHEN $due_expr IS NULL THEN 'no due date' WHEN DATE(wd.sent_date) = DATE($due_expr) THEN 'On Time'
              WHEN DATE(wd.sent_date) > DATE($due_expr) THEN 'Delay' ELSE 'Ahead' END AS schedule
     $dp_from ORDER BY wd.idh_id DESC LIMIT 20"), 20);
 
-echo '<h3>5d. What does inw_otp_dispatch_history.a_id point to?</h3>';
+echo '<h3>5d. Data checks for inw_conversion_dispatch_history</h3>';
 dbg_show('Dispatch history overview (all dates)', dbg_run("SELECT COUNT(*) AS total_rows, MIN(sent_date) AS first_sent, MAX(sent_date) AS last_sent,
-        COUNT(DISTINCT dispatch_type) AS dispatch_types, GROUP_CONCAT(DISTINCT dispatch_type SEPARATOR ', ') AS dispatch_type_values
-    FROM inw_otp_dispatch_history"));
-dbg_show('a_id matches (the report uses chapter id first, then book id)', dbg_run("SELECT COUNT(*) AS rows_total,
-        SUM(ch.id IS NOT NULL) AS a_id_is_chapter_id, SUM(ch.id IS NULL AND bk.id IS NOT NULL) AS a_id_is_book_id, SUM(ch.id IS NULL AND bk.id IS NULL) AS no_match
-    FROM inw_otp_dispatch_history wd
-    LEFT JOIN inw_conversion_project_dtl ch ON ch.id = wd.a_id
-    LEFT JOIN inw_conversion_dtl bk ON bk.id = wd.a_id"));
+        GROUP_CONCAT(DISTINCT dispatch_type SEPARATOR ', ') AS dispatch_type_values, GROUP_CONCAT(DISTINCT stage SEPARATOR ', ') AS stages
+    FROM inw_conversion_dispatch_history"));
+dbg_show('Do the ids resolve? (b_id -> book, r_id -> revision)', dbg_run("SELECT COUNT(*) AS rows_total,
+        SUM(bk.id IS NOT NULL) AS book_found, SUM(bk.id IS NULL) AS book_missing,
+        SUM(wd.r_id IS NOT NULL AND wd.r_id > 0) AS has_r_id, SUM(wd.r_id > 0 AND rv.r_id IS NULL) AS revision_missing,
+        SUM(c.id IS NULL) AS customer_missing
+    FROM inw_conversion_dispatch_history wd
+    LEFT JOIN inw_conversion_dtl bk ON bk.id = wd.b_id
+    LEFT JOIN inw_conversion_revisions_dtl rv ON rv.r_id = wd.r_id
+    LEFT JOIN adm_customer_master c ON c.id = wd.cust_id"));
 dbg_show('Status values in use (inw_conversion_dtl)', dbg_run("SELECT status, COUNT(*) AS projects FROM inw_conversion_dtl GROUP BY status ORDER BY projects DESC"), 50);
 ?>
 
