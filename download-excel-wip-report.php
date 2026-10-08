@@ -43,6 +43,32 @@ function fmt_dt($v) {
     return $ts ? date('d M Y', $ts) : '';
 }
 
+/* Column names of a table (lower-case => true), so optional columns can be skipped instead of failing. */
+function xls_cols($table) {
+    static $cache = array();
+    if (!isset($cache[$table])) {
+        $cache[$table] = array();
+        $r = dbq("SHOW COLUMNS FROM `" . $table . "`");
+        while ($x = $r->fetch_assoc()) {
+            $cache[$table][strtolower($x['Field'])] = true;
+        }
+    }
+    return $cache[$table];
+}
+
+/* FP uses the project dates, later stages the latest revision (project dates as fallback). */
+function xls_dates($row) {
+    $recv = $row['recv_dt'];
+    $due = $row['due_dt'];
+    if ($row['stage'] != 'FP' && !empty($row['due_date'])) {
+        $due = $row['due_date'];
+        if (!empty($row['received_date'])) {
+            $recv = $row['received_date'];
+        }
+    }
+    return array($recv, $due);
+}
+
 /* ------------------- request normalisation ------------------- */
 foreach (array('radio', 'cust_id', 'j_id', 'stage_id', 'dep_id', 'dp_platform', 'date_wise', 'from_dt', 'to_dt', 'mfrom_dt', 'yfrom_dt') as $k) {
     if (!isset($_REQUEST[$k]) || is_array($_REQUEST[$k])) {
@@ -52,6 +78,8 @@ foreach (array('radio', 'cust_id', 'j_id', 'stage_id', 'dep_id', 'dp_platform', 
 $is_cust_user = ((int) (isset($_SESSION['user_level']) ? $_SESSION['user_level'] : 0) === 5);
 $search1 = $search2 = $search3 = '';
 $cccb = '';
+$conv_cols = xls_cols('inw_conversion_dtl');
+$rev_cols = xls_cols('inw_conversion_revisions_dtl');
 
 /* ------------------------------ filters (same rules as the on-screen WIP report) ------------------------------ */
 if ($_REQUEST['cust_id'] != "" && $_REQUEST['cust_id'] != 'all') {
@@ -60,13 +88,13 @@ if ($_REQUEST['cust_id'] != "" && $_REQUEST['cust_id'] != 'all') {
 if ($_REQUEST['stage_id'] != "" && $_REQUEST['stage_id'] != 'all') {
     $search2 .= "and wd.stage like '%" . esc($_REQUEST['stage_id']) . "%' ";
 }
-if ($_REQUEST['dep_id'] != '') {
+if ($_REQUEST['dep_id'] != '' && isset($conv_cols['department_id'])) {
     $cccb .= "and wd.department_id= '" . esc($_REQUEST['dep_id']) . "' ";
 }
 
 /* Status filter: Query / Hold are only included when ticked. */
 $inpt_status = (isset($_REQUEST['inpt_status']) && is_array($_REQUEST['inpt_status'])) ? array_values($_REQUEST['inpt_status']) : array();
-$excluded_status = array('Delivery', 'Client Review', 'Completed', 'Query', 'Hold');
+$excluded_status = array('Client_Delivery', 'Delivery', 'Client Review', 'Completed', 'Query', 'Hold');
 foreach (array('Query', 'Hold') as $st) {
     if (in_array($st, $inpt_status, true)) {
         $excluded_status = array_diff($excluded_status, array($st));
@@ -91,20 +119,30 @@ if ($_REQUEST['date_wise'] != "y" && $_REQUEST['date_wise'] != "m" && $_REQUEST[
     $search3 .= "AND wd.created_dt >='2020-03-01'";
 }
 
-/* ------------------------------ query (books) ------------------------------ */
-$wip_from = "FROM `inw_book_dtl` as wd LEFT JOIN inw_book_revisions_dtl as r ON (wd.`id` = r.`b_id` AND r.r_id = (SELECT MAX(r2.r_id) FROM inw_book_revisions_dtl as r2 WHERE r2.b_id = wd.`id`)), adm_customer_master as c WHERE wd.cust_id = c.id ";
+/* ------------------------------ query (conversion projects) ------------------------------ */
+$rev_extra = '';
+foreach (array('revision_count', 'correction_pages') as $rc) {
+    if (isset($rev_cols[$rc])) {
+        $rev_extra .= ", r.$rc";
+    }
+}
+$wip_from = "FROM `inw_conversion_dtl` as wd LEFT JOIN inw_conversion_revisions_dtl as r ON (wd.`id` = r.`b_id` AND r.r_id = (SELECT MAX(r2.r_id) FROM inw_conversion_revisions_dtl as r2 WHERE r2.b_id = wd.`id`)), adm_customer_master as c WHERE wd.cust_id = c.id ";
 if ($is_cust_user) {
-    $wip_scope = " AND (wd.cust_id = '" . esc($_SESSION['cust_id']) . "' OR FIND_IN_SET(wd.cust_id,'" . esc($_SESSION['ocust_id']) . "')) AND wd.status NOT IN ('Client Review','Completed') ";
+    $wip_scope = " AND (wd.cust_id = '" . esc($_SESSION['cust_id']) . "' OR FIND_IN_SET(wd.cust_id,'" . esc($_SESSION['ocust_id']) . "')) AND wd.status NOT IN ('Client_Delivery','Client Review','Completed') ";
 } else {
-    $wip_scope = " AND wd.status NOT IN ('Client Review','Completed') ";
+    $wip_scope = " AND wd.status NOT IN ('Client_Delivery','Client Review','Completed') ";
 }
 $wip_where = $wip_scope . " $cccb $search1 $search2 $search3 " . $status_qry . " ";
-$query = "SELECT c.cust_name, wd.*, r.received_date, r.due_date, r.correction_pages, r.revision_count " . $wip_from . $wip_where . " ORDER BY FIELD(highpriority, 1) desc,`due_dt` asc";
+$order_by = isset($conv_cols['highpriority']) ? "ORDER BY FIELD(wd.highpriority, 1) desc, wd.due_dt asc" : "ORDER BY wd.due_dt asc";
+$query = "SELECT c.cust_name, wd.*, r.received_date, r.due_date" . $rev_extra . ",
+    (SELECT COUNT(id) FROM inw_conversion_project_dtl WHERE b_id = wd.id AND status IN ('Client_Delivery','Delivery')) AS ccount,
+    (SELECT COUNT(id) FROM inw_conversion_project_dtl WHERE b_id = wd.id AND status NOT IN ('Client_Delivery','Delivery')) AS pcount,
+    (SELECT COUNT(id) FROM inw_conversion_service_dtl WHERE b_id = wd.id AND status IN ('Client_Delivery','Delivery')) AS sccount,
+    (SELECT COUNT(id) FROM inw_conversion_service_dtl WHERE b_id = wd.id AND status NOT IN ('Client_Delivery','Delivery')) AS spcount " . $wip_from . $wip_where . " " . $order_by;
 
 $articles = dbq($query);
 $total_pages = $articles->num_rows;
-$show_alloc = ($_REQUEST['dep_id'] == '1' || $_REQUEST['dep_id'] == '2');
-$show_stage_due = !$show_alloc;
+$show_alloc = (($_REQUEST['dep_id'] == '1' || $_REQUEST['dep_id'] == '2') && isset($conv_cols['assigned_user_id']));
 
 /* ------------------------------ output (.xls) ------------------------------
    Headers are sent only now, after the queries, so a failure cannot corrupt the download.
@@ -125,65 +163,40 @@ header("Pragma: public");
 </head>
 <body>
 <table border="1" cellspacing="0" cellpadding="3">
-    <tr><td colspan="8"><b>WIP Report - Total count: <?php echo (int) $total_pages; ?></b></td></tr>
+    <tr><td colspan="14"><b>WIP Report - Total count: <?php echo (int) $total_pages; ?></b></td></tr>
     <thead>
         <tr style="background-color:#4E9AEC;color:#ffffff;">
             <th>Client</th>
-            <th>Book Name</th>
-            <?php if ($show_stage_due) { ?><th>Stage</th><?php } ?>
+            <th>Project Name</th>
+            <th>Work Type</th>
+            <th>Stage</th>
+            <th>Page Count</th>
+            <th>Fig Count</th>
+            <th>Table Count</th>
             <th>Received Date</th>
-            <?php if ($show_stage_due) { ?><th>Due Date</th><?php } ?>
+            <th>Due Date</th>
             <?php if ($show_alloc) { ?><th>Alloted to</th><th>Alloted Due date</th><?php } ?>
+            <th>#Chapters Done</th>
+            <th>#Chapters Pending</th>
+            <th>#Services Done</th>
+            <th>#Services Pending</th>
             <th>Status</th>
-            <th>Graphics</th>
         </tr>
     </thead>
     <tbody>
 <?php
 while ($row_history = $articles->fetch_assoc()) {
-    $stage_r = preg_replace("/REV([0-9]+)/", "REV", $row_history['stage']);
-    $stage_i = preg_replace("/ISSCOR([0-9]+)/", "ISSCOR", $row_history['stage']);
+    list($recv_dt, $due_dt) = xls_dates($row_history);
 
-    $trans_sql = "SELECT u.full_name,t.current_status,t.completion_status,t.comments,t.id FROM `inw_transactions` as t,users as u WHERE t.process_user = u.id AND t.`project_id` = '" . (int) $row_history['id'] . "' AND t.created_dt > '2020-03-01'  AND t.current_status NOT IN ('Completed','Take Over') AND t.stage = '" . esc($row_history['stage']) . "' AND (t.id=(select id from `inw_transactions` where dept!=9 and `project_id` = '" . (int) $row_history['id'] . "' ORDER BY `id` DESC limit 1))  ORDER BY t.`id` DESC limit 1;";
-    $chk_transaction = dbq($trans_sql);
-    $transaction_total_count = $chk_transaction->num_rows;
-    $trans_res = $chk_transaction->fetch_assoc();
-    $assign_comments = dbq("select * from inw_transactions where project_id='" . (int) $row_history['id'] . "' and dept='14' and completion_status=6 order by id desc limit 1");
-    $num_acount = $assign_comments->num_rows;
-    $res_ac = $assign_comments->fetch_array();
-
-    $assign_cepe = array();
-    if ($show_alloc) {
-        $assign_cepe = dbq_row("select * from users where id='" . (int) $row_history['assigned_user_id'] . "'");
-    }
-
-    // stage / received / due columns (same rules as the on-screen report)
-    if ($row_history['stage'] == 'FP') {
-        $stage_txt = $row_history['stage'];
-        $recv_txt = fmt_dt($row_history['recv_dt']);
-        $due_txt = fmt_dt($row_history['due_dt']);
-        $due_for_check = $row_history['due_dt'];
-    } elseif ($stage_r == 'REV') {
-        $stage_txt = "REV" . $row_history['revision_count'];
-        $recv_txt = fmt_dt($row_history['received_date']);
-        $due_txt = fmt_dt($row_history['due_date']);
-        $due_for_check = $row_history['due_date'];
-    } elseif ($stage_i == 'ISSCOR') {
-        $stage_txt = $row_history['stage'];
-        $recv_txt = fmt_dt($row_history['created_dt']);
-        $due_txt = fmt_dt($row_history['due_dt']);
-        $due_for_check = $row_history['due_date'];
-    } else {
-        $stage_txt = $row_history['stage'];
-        $recv_txt = fmt_dt($row_history['received_date']);
-        $due_txt = fmt_dt($row_history['due_date']);
-        $due_for_check = $row_history['due_date'];
-    }
+    $trans = dbq("SELECT u.full_name,t.current_status FROM `inw_transactions` as t,users as u WHERE t.process_user = u.id AND t.`project_id` = '" . (int) $row_history['id'] . "' AND t.created_dt > '2020-03-01'  AND t.current_status NOT IN ('Completed','Take Over') AND t.stage = '" . esc($row_history['stage']) . "' AND (t.id=(select id from `inw_transactions` where dept!=9 and `project_id` = '" . (int) $row_history['id'] . "' ORDER BY `id` DESC limit 1))  ORDER BY t.`id` DESC limit 1")->fetch_assoc();
+    $assign_comments = dbq("select comments from inw_transactions where project_id='" . (int) $row_history['id'] . "' and dept='14' and completion_status=6 order by id desc limit 1");
+    $res_ac = $assign_comments->fetch_assoc();
+    $assign_cepe = $show_alloc ? dbq_row("select full_name from users where id='" . (int) $row_history['assigned_user_id'] . "'") : array();
 
     // row colour (CSS classes do not exist in Excel, so use inline colours)
     $bg = '';
-    $due_ts = $due_for_check ? strtotime($due_for_check) : false;
-    if ($row_history['highpriority'] == 1) {
+    $due_ts = $due_dt ? strtotime($due_dt) : false;
+    if (isset($row_history['highpriority']) && $row_history['highpriority'] == 1) {
         $bg = '#d9edf7';
     } elseif ($row_history['status'] == 'Query' || $row_history['status'] == 'Hold') {
         $bg = '#d3d3d4';
@@ -193,25 +206,32 @@ while ($row_history = $articles->fetch_assoc()) {
 
     // status cell as plain text (HTML labels are meaningless in Excel)
     $status_txt = $row_history['status'];
-    if ($transaction_total_count > 0) {
-        $status_txt .= ' | ' . $trans_res['full_name'] . ' | ' . $trans_res['current_status'];
+    if ($trans) {
+        $status_txt .= ' | ' . $trans['full_name'] . ' | ' . $trans['current_status'];
     }
-    if ($num_acount > 0) {
+    if ($res_ac) {
         $status_txt .= ' | ' . ($res_ac['comments'] != '' ? $res_ac['comments'] : 'No Comments');
     }
     ?>
         <tr<?php echo $bg ? ' style="background-color:' . $bg . ';"' : ''; ?>>
             <td><?php echo h($row_history['cust_name']); ?></td>
             <td><?php echo h($row_history['book_short_name']); ?></td>
-            <?php if ($show_stage_due) { ?><td><?php echo h($stage_txt); ?></td><?php } ?>
-            <td><?php echo h($recv_txt); ?></td>
-            <?php if ($show_stage_due) { ?><td><?php echo h($due_txt); ?></td><?php } ?>
+            <td><?php echo h(isset($row_history['digital_type']) ? $row_history['digital_type'] : ''); ?></td>
+            <td><?php echo h($row_history['stage']); ?></td>
+            <td><?php echo h(isset($row_history['manuscript_count']) ? $row_history['manuscript_count'] : ''); ?></td>
+            <td><?php echo h(isset($row_history['fig']) ? $row_history['fig'] : ''); ?></td>
+            <td><?php echo h(isset($row_history['tab']) ? $row_history['tab'] : ''); ?></td>
+            <td><?php echo h(fmt_dt($recv_dt)); ?></td>
+            <td><?php echo h(fmt_dt($due_dt)); ?></td>
             <?php if ($show_alloc) { ?>
                 <td><?php echo h(isset($assign_cepe['full_name']) ? $assign_cepe['full_name'] : ''); ?></td>
                 <td><?php echo h(fmt_dt(isset($row_history['ce_pe_due_date']) ? $row_history['ce_pe_due_date'] : '')); ?></td>
             <?php } ?>
+            <td><?php echo (int) $row_history['ccount']; ?></td>
+            <td><?php echo (int) $row_history['pcount']; ?></td>
+            <td><?php echo (int) $row_history['sccount']; ?></td>
+            <td><?php echo (int) $row_history['spcount']; ?></td>
             <td><?php echo h($status_txt); ?></td>
-            <td><?php echo ($row_history['fig_complete_status'] == '1') ? 'Yes' : 'No'; ?></td>
         </tr>
 <?php
 }

@@ -87,6 +87,61 @@ function msr_qs($keys) {
     return http_build_query($p);
 }
 
+/* Column names of a table (lower-case => true). Lets the report adapt to optional columns instead of failing on them. */
+function msr_cols($table) {
+    static $cache = array();
+    if (!isset($cache[$table])) {
+        $cache[$table] = array();
+        $r = dbq("SHOW COLUMNS FROM `" . $table . "`");
+        while ($x = $r->fetch_assoc()) {
+            $cache[$table][strtolower($x['Field'])] = true;
+        }
+    }
+    return $cache[$table];
+}
+
+/* Column of inw_conversion_dtl that holds the client delivery date (first match), or '' when none exists. */
+function msr_delivery_col() {
+    $cols = msr_cols('inw_conversion_dtl');
+    foreach (array('sent_date', 'delivery_dt', 'delivered_dt', 'delivery_date', 'delivered_date', 'client_delivery_dt', 'completed_dt', 'completed_date') as $c) {
+        if (isset($cols[$c])) {
+            return $c;
+        }
+    }
+    return '';
+}
+
+/* Latest open transaction (user + status) of a project, plus the allocation comment, as label HTML. */
+function msr_status_html($row, $with_comments) {
+    $id = (int) $row['id'];
+    $o = '<span class="label label-sm label-success">' . h($row['status']) . '</span>';
+    $t = dbq("SELECT u.full_name,t.current_status FROM `inw_transactions` as t,users as u WHERE t.process_user = u.id AND t.`project_id` = '" . $id . "' AND t.created_dt > '2020-03-01' AND t.current_status NOT IN ('Completed','Take Over') AND t.stage = '" . esc($row['stage']) . "' AND (t.id=(select id from `inw_transactions` where dept!=9 and `project_id` = '" . $id . "' ORDER BY `id` DESC limit 1)) ORDER BY t.`id` DESC limit 1")->fetch_assoc();
+    if ($t) {
+        $o .= '<span class="label label-sm label-info">' . h($t['full_name']) . '</span>|<span class="label label-sm label-warning">' . h($t['current_status']) . '</span>';
+    }
+    if ($with_comments) {
+        $c = dbq("select comments from inw_transactions where project_id='" . $id . "' and dept='14' and completion_status=6 order by id desc limit 1");
+        if ($c->num_rows > 0) {
+            $cr = $c->fetch_assoc();
+            $o .= '|<span class="label label-sm label-danger">' . ($cr['comments'] != '' ? h($cr['comments']) : 'No Comments') . '</span>';
+        }
+    }
+    return $o;
+}
+
+/* "FP" / "REV2" / "FIN" ... -> received/due dates to show: FP uses the project, later stages the latest revision (project as fallback). */
+function msr_dates($row) {
+    $recv = $row['recv_dt'];
+    $due = $row['due_dt'];
+    if ($row['stage'] != 'FP' && !empty($row['due_date'])) {
+        $due = $row['due_date'];
+        if (!empty($row['received_date'])) {
+            $recv = $row['received_date'];
+        }
+    }
+    return array($recv, $due);
+}
+
 function msr_debug_panel() {
     global $msr_debug, $msr_log, $msr_t0, $ccc, $cccb, $search, $search1, $search2, $search3, $search4, $search_cd, $search_cm, $search_cy;
     if (!$msr_debug) {
@@ -159,12 +214,17 @@ $is_cust_user = ((int) (isset($_SESSION['user_level']) ? $_SESSION['user_level']
 $search = $search1 = $search2 = $search3 = $search4 = '';
 $search_cd = $search_cm = $search_cy = $searchfp = '';
 $ccc = '';   // filters for journal tables (adm_journals aliased as j)
-$cccb = '';  // filters for book tables (inw_book_dtl aliased as wd)
+$cccb = '';  // filters for inw_conversion_dtl (aliased as wd)
 $otherParams = '';
 $i = $j = $k = $l = 0;
 $kg = $jg = $lg = 0;
 $tfp_id_count = $tfev_id_count = $tfin_id_count = 0;
 $filePathKeys = array('radio', 'cust_id', 'j_id', 'stage_id', 'dep_id', 'dp_platform', 'from_dt', 'to_dt', 'mfrom_dt', 'yfrom_dt', 'date_wise');
+
+/* optional columns / delivery-date column of the conversion tables */
+$conv_cols = msr_cols('inw_conversion_dtl');
+$rev_cols = msr_cols('inw_conversion_revisions_dtl');
+$dcol = msr_delivery_col();
 
 /* ------------------------------ filters ------------------------------ */
 if ($_REQUEST['cust_id'] != "" && $_REQUEST['cust_id'] != 'all') {
@@ -180,7 +240,9 @@ if ($_REQUEST['stage_id'] != "" && $_REQUEST['stage_id'] != 'all') {
 }
 if ($_REQUEST['dep_id'] != '') {
     $ccc .= "and department_id= '" . esc($_REQUEST['dep_id']) . "' ";
-    $cccb .= "and wd.department_id= '" . esc($_REQUEST['dep_id']) . "' ";
+    if (isset($conv_cols['department_id'])) {
+        $cccb .= "and wd.department_id= '" . esc($_REQUEST['dep_id']) . "' ";
+    }
 }
 if ($_REQUEST['dp_platform'] != "") {
     $ccc .= "and j.j_platform='" . esc($_REQUEST['dp_platform']) . "' ";
@@ -189,7 +251,7 @@ if ($_REQUEST['dp_platform'] != "") {
 /* Status filter (Query / Hold checkboxes). Read from the request every time so paging keeps it
    and un-ticking both boxes really resets it. */
 $inpt_status = (isset($_REQUEST['inpt_status']) && is_array($_REQUEST['inpt_status'])) ? array_values($_REQUEST['inpt_status']) : array();
-$excluded_status = array('Delivery', 'Client Review', 'Completed', 'Query', 'Hold');
+$excluded_status = array('Client_Delivery', 'Delivery', 'Client Review', 'Completed', 'Query', 'Hold');
 foreach (array('Query', 'Hold') as $st) {
     if (in_array($st, $inpt_status, true)) {
         $excluded_status = array_diff($excluded_status, array($st));
@@ -209,17 +271,17 @@ if ($_REQUEST['radio'] == 'dp' || $_REQUEST['radio'] == 'cr') {
     if ($_REQUEST['from_dt'] != "" && $_REQUEST['date_wise'] == "d") {
         $frm = date('Y-m-d', strtotime($_REQUEST['from_dt']));
         $to = date('Y-m-d', strtotime($_REQUEST['to_dt']));
-        $search .= "and DATE_FORMAT(wd.sent_date,'%Y-%m-%d') >='" . $frm . "' AND DATE_FORMAT(wd.sent_date,'%Y-%m-%d')<='" . $to . "'";
+        $search .= "and DATE_FORMAT(wd.{$dcol},'%Y-%m-%d') >='" . $frm . "' AND DATE_FORMAT(wd.{$dcol},'%Y-%m-%d')<='" . $to . "'";
     }
     if ($_REQUEST['date_wise'] == "m") {
-        $search .= "and DATE_FORMAT(wd.sent_date,'%m-%Y')='" . esc($_REQUEST['mfrom_dt']) . "'";
+        $search .= "and DATE_FORMAT(wd.{$dcol},'%m-%Y')='" . esc($_REQUEST['mfrom_dt']) . "'";
     }
     if ($_REQUEST['date_wise'] == "y") {
-        $search .= "and DATE_FORMAT(wd.sent_date,'%Y')='" . esc($_REQUEST['yfrom_dt']) . "'";
+        $search .= "and DATE_FORMAT(wd.{$dcol},'%Y')='" . esc($_REQUEST['yfrom_dt']) . "'";
     }
     if ($_REQUEST['date_wise'] != "y" && $_REQUEST['date_wise'] != "m" && $_REQUEST['date_wise'] != "d") {
-        $search3 .= "AND wd.sent_date >='2020-03-01'";
-        $search4 .= "AND wd.sent_date >='2020-03-01'";
+        $search3 .= "AND wd.{$dcol} >='2020-03-01'";
+        $search4 .= "AND wd.{$dcol} >='2020-03-01'";
     }
 } elseif ($_REQUEST['radio'] == 'sfd') {
     if ($_REQUEST['sdf_dt'] != "") {
@@ -233,19 +295,19 @@ if ($_REQUEST['radio'] == 'dp' || $_REQUEST['radio'] == 'cr') {
         $search .= "and wd.recv_dt >='" . $frm . "' AND wd.recv_dt<='" . $to . "'";
         $search3 .= "and ((wd.recv_dt >='" . $frm . "' AND wd.recv_dt<='" . $to . "') or (r.received_date >='" . $frm . "' AND r.received_date<='" . $to . "'))";
         $search4 .= "and ((wd.due_dt >='" . $frm . "' AND wd.due_dt<='" . $to . "') or (r.due_date >='" . $frm . "' AND r.due_date<='" . $to . "'))";
-        $search_cd .= "and (created_dt >='" . $frm . "' AND created_dt<='" . $to . "')";
+        $search_cd .= "and (wd.created_dt >='" . $frm . "' AND wd.created_dt<='" . $to . "')";
     }
     if ($_REQUEST['date_wise'] == "m") {
         $frm = esc($_REQUEST['mfrom_dt']);
         $search .= "and DATE_FORMAT(wd.recv_dt,'%m-%Y')='" . $frm . "'";
         $search3 .= "and ((DATE_FORMAT(wd.recv_dt,'%m-%Y')='" . $frm . "') or (DATE_FORMAT(r.received_date,'%m-%Y')='" . $frm . "'))";
         $search4 .= "and ((DATE_FORMAT(wd.recv_dt,'%m-%Y')='" . $frm . "') or (DATE_FORMAT(r.due_date,'%m-%Y')='" . $frm . "'))";
-        $search_cm .= "and (DATE_FORMAT(created_dt,'%m-%Y')='" . $frm . "')";
+        $search_cm .= "and (DATE_FORMAT(wd.created_dt,'%m-%Y')='" . $frm . "')";
     }
     if ($_REQUEST['date_wise'] == "y") {
         $frm = esc($_REQUEST['yfrom_dt']);
         $search .= "and DATE_FORMAT(wd.recv_dt,'%Y')='" . $frm . "'";
-        $search_cy .= "and (DATE_FORMAT(created_dt,'%Y')='" . $frm . "')";
+        $search_cy .= "and (DATE_FORMAT(wd.created_dt,'%Y')='" . $frm . "')";
         $search3 .= "and ((DATE_FORMAT(wd.recv_dt,'%Y')='" . $frm . "') or (DATE_FORMAT(r.received_date,'%Y')='" . $frm . "'))";
         $search4 .= "and ((DATE_FORMAT(wd.due_dt,'%Y')='" . $frm . "') or (DATE_FORMAT(r.due_date,'%Y')='" . $frm . "'))";
     }
@@ -411,7 +473,7 @@ font-size: x-large;
                     </div>
                     <div class="page-content">
                         <div class="page-header">
-                            <h1> Master Status Report</h1>
+                            <h1> Conversion Master Status Report</h1>
                         </div>
                         <!-- /.page-header -->
                         <div class="row">
@@ -540,19 +602,7 @@ font-size: x-large;
                                                                         </div>
                                                                     </div>
 																	
-																	 <div class="form-group" id="platform_dp" style="display:none;">
-                                                                        <label class="control-label col-xs-12 col-sm-4 no-padding-right" for="email">Choose Platform:</label>
-                                                                        <div class="col-xs-12 col-sm-8">
-                                                                            <div class="clearfix">
-						<select name="dp_platform" id="dp_platform">
-                                <option value="">-Select-</option>
-                                <?php foreach((isset($platform_journal_array) && is_array($platform_journal_array)) ? $platform_journal_array : array() as $id=>$val){?>
-                                <option <?php if ($_REQUEST['dp_platform'] ==$val) { ?>selected<?php } ?> value="<?php echo $val; ?>"><?php echo $val; ?></option>
-                                <?php } ?>
-                              </select>
-                                                                            </div>
-                                                                        </div>
-                                                                    </div>
+																	 
 																	  <div class="form-group" id="date_sdf" style="display:none;">
                                                                             <label class="control-label col-xs-12 col-sm-3 no-padding-right" for="name">Date:</label>
                                                                             <div class="col-xs-5  col-sm-6">
@@ -740,276 +790,128 @@ font-size: x-large;
                                                     <br>
 
                                                     <?php
-													//echo h($_REQUEST['radio']);
 													if ($_REQUEST['radio']=='wip') {
-														
-														$wip_from = "FROM `inw_book_dtl` as wd LEFT JOIN inw_book_revisions_dtl as r ON (wd.`id` = r.`b_id` AND r.r_id = (SELECT MAX(r2.r_id) FROM inw_book_revisions_dtl as r2 WHERE r2.b_id = wd.`id`)), adm_customer_master as c WHERE wd.cust_id = c.id ";
-													if ($is_cust_user) {
-														$wip_scope = " AND (wd.cust_id = '" . esc($_SESSION['cust_id']) . "' OR FIND_IN_SET(wd.cust_id,'" . esc($_SESSION['ocust_id']) . "')) AND wd.status NOT IN ('Client Review','Completed') ";
-													} else {
-														$wip_scope = " AND wd.status NOT IN ('Client Review','Completed') ";
-													}
-													$wip_where = $wip_scope . " $cccb $search1 $search2 $search3 " . $_SESSION['inpt_status_qry'] . " ";
-													$query = "SELECT c.cust_name, wd.*, r.received_date, r.due_date, r.correction_pages, r.revision_count " . $wip_from . $wip_where;
-													$cnt_query = "SELECT COUNT(wd.id) as num " . $wip_from . $wip_where;
-$customers = dbq($cnt_query);
-													$page_count = $customers->fetch_assoc();
-													$total_pages = isset($page_count['num']) ? (int) $page_count['num'] : 0;
-													
-													
-													$order_by = "ORDER BY FIELD(highpriority, 1) desc,`due_dt` asc";
-													$start = max(0, (int) $_REQUEST['start']);
-										$filePath = $self . '?page=1&' . msr_qs($filePathKeys);
-													$limit =10; //how many items to show per page
-													
-													$query = $query. $order_by." LIMIT $start, $limit";  
-													//echo $query;
-													$articles = dbq($query);	
-                                                    $articles->num_rows;
-													//echo "fdgfdg".$total_pages;
-                                                   
-													
-												
+														$rev_extra = '';
+														foreach (array('revision_count', 'correction_pages') as $rc) {
+															if (isset($rev_cols[$rc])) {
+																$rev_extra .= ", r.$rc";
+															}
+														}
+														$wip_from = "FROM `inw_conversion_dtl` as wd LEFT JOIN inw_conversion_revisions_dtl as r ON (wd.`id` = r.`b_id` AND r.r_id = (SELECT MAX(r2.r_id) FROM inw_conversion_revisions_dtl as r2 WHERE r2.b_id = wd.`id`)), adm_customer_master as c WHERE wd.cust_id = c.id ";
+														if ($is_cust_user) {
+															$wip_scope = " AND (wd.cust_id = '" . esc($_SESSION['cust_id']) . "' OR FIND_IN_SET(wd.cust_id,'" . esc($_SESSION['ocust_id']) . "')) AND wd.status NOT IN ('Client_Delivery','Client Review','Completed') ";
+														} else {
+															$wip_scope = " AND wd.status NOT IN ('Client_Delivery','Client Review','Completed') ";
+														}
+														$wip_where = $wip_scope . " $cccb $search1 $search2 $search3 " . $_SESSION['inpt_status_qry'] . " ";
+														$query = "SELECT c.cust_name, wd.*, r.received_date, r.due_date" . $rev_extra . ",
+															(SELECT COUNT(id) FROM inw_conversion_project_dtl WHERE b_id = wd.id AND status IN ('Client_Delivery','Delivery')) AS ccount,
+															(SELECT COUNT(id) FROM inw_conversion_project_dtl WHERE b_id = wd.id AND status NOT IN ('Client_Delivery','Delivery')) AS pcount,
+															(SELECT COUNT(id) FROM inw_conversion_service_dtl WHERE b_id = wd.id AND status IN ('Client_Delivery','Delivery')) AS sccount,
+															(SELECT COUNT(id) FROM inw_conversion_service_dtl WHERE b_id = wd.id AND status NOT IN ('Client_Delivery','Delivery')) AS spcount " . $wip_from . $wip_where;
+														$cnt_query = "SELECT COUNT(wd.id) as num " . $wip_from . $wip_where;
+														$page_count = dbq($cnt_query)->fetch_assoc();
+														$total_pages = isset($page_count['num']) ? (int) $page_count['num'] : 0;
 
-												
-                                                    ?>   
-															<div class="page-header">
-                                                            <h1>WIP Report <b style="color:red;font-size:14px;"> - Total count :<?php echo $total_pages;?></b> <a href="download-excel-wip-report.php?<?php echo h(msr_qs(array('cust_id', 'j_id', 'stage_id', 'dp_platform', 'dep_id', 'radio'))); ?>" class="btn btn-primary">Download Excel </a></h1> 				
-
+														$order_by = isset($conv_cols['highpriority']) ? "ORDER BY FIELD(wd.highpriority, 1) desc, wd.due_dt asc" : "ORDER BY wd.due_dt asc";
+														$start = max(0, (int) $_REQUEST['start']);
+														$filePath = $self . '?page=1&' . msr_qs($filePathKeys);
+														$limit = 10; //how many items to show per page
+														$articles = dbq($query . " " . $order_by . " LIMIT $start, $limit");
+														$show_alloc = (($_REQUEST['dep_id'] == '1' || $_REQUEST['dep_id'] == '2') && isset($conv_cols['assigned_user_id']));
+                                                    ?>
+														<div class="page-header">
+                                                            <h1>WIP Report <b style="color:red;font-size:14px;"> - Total count :<?php echo $total_pages;?></b> <a href="download-excel-wip-report.php?<?php echo h(msr_qs(array('cust_id', 'j_id', 'stage_id', 'dep_id', 'radio'))); ?>" class="btn btn-primary">Download Excel </a></h1>
                                                         </div>
                                                     <div class="myTable1">
-
                                                         <table class="table table-striped table-bordered table-hover">
                                                             <thead>
-                                                            <th>Client </th>
-                                                            <th>Book Name</th>
-															<?php 
-															if(($_REQUEST['dep_id']!=1) && ($_REQUEST['dep_id']!=2))
-															{
-															?>
+                                                            <tr>
+                                                            <th>Client</th>
+                                                            <th>Project Name</th>
+                                                            <th>Work Type</th>
                                                             <th>Stage</th>
-															<?php 
-															}
-															?>
+                                                            <th>Page Count</th>
+                                                            <th>Fig Count</th>
+                                                            <th>Table Count</th>
                                                             <th>Received Date</th>
-															<?php 
-															if(($_REQUEST['dep_id']!=1) && ($_REQUEST['dep_id']!=2))
-															{
-															?>
-                                                             <th>Due Date</th>
-															<?php 
-															}
-															 
-															if($_REQUEST['dep_id']=='1' || $_REQUEST['dep_id']=='2')
-															{
-															?>
-                                                              <th>Alloted to</th>
-                                                              <th>Alloted Due date</th>
-															<?php 
-															}
-															?>
+                                                            <th>Due Date</th>
+                                                            <?php if ($show_alloc) { ?><th>Alloted to</th><th>Alloted Due date</th><?php } ?>
+                                                            <th>#Chapters Done</th>
+                                                            <th>#Chapters Pending</th>
+                                                            <th>#Services Done</th>
+                                                            <th>#Services Pending</th>
                                                             <th>Status</th>
-                                                            <th>Graphics</th>
+                                                            </tr>
                                                             </thead>
                                                             <tbody id="tbl1Body">
-                                                                <?php
-                                                                if ($articles->num_rows > 0) {
-                                                                    ?>
-                                                                    <?php
-                                                                    while ($row_history = $articles->fetch_assoc()) {
-																		
-																		$stage_r=preg_replace("/REV([0-9]+)/","REV",$row_history['stage']);
-																		$stage_i=preg_replace("/ISSCOR([0-9]+)/","ISSCOR",$row_history['stage']);
-                                                                        //print_r($row_history);
-																		
-																		$trans_sql = "SELECT u.full_name,t.current_status,t.completion_status,t.comments,t.id FROM `inw_transactions` as t,users as u WHERE t.process_user = u.id AND t.`project_id` = '".$row_history['id']."' AND t.created_dt > '2020-03-01'  AND t.current_status NOT IN ('Completed','Take Over') AND t.stage = '".$row_history['stage']."' AND (t.id=(select id from `inw_transactions` where dept!=9 and `project_id` = '".$row_history['id']."' ORDER BY `id` DESC limit 1))  ORDER BY t.`id` DESC limit 1;";
-		//echo $trans_sql.'<br>';		
-																			$chk_transaction = dbq($trans_sql); 
-																			$transaction_toatl_count=$chk_transaction->num_rows;
-																			$trans_res = $chk_transaction->fetch_assoc();	
-																			$assign_comments=dbq("select * from inw_transactions where project_id='".$row_history['id']."' and dept='14' and completion_status=6 order by id desc limit 1");
-																			$num_acount=$assign_comments->num_rows;
-																			$res_ac=$assign_comments->fetch_array();
-																			
-															if($_REQUEST['dep_id']=='1' || $_REQUEST['dep_id']=='2')
-															{
-															$assign_cepe=dbq_row("select * from users where id='".$row_history['assigned_user_id']."'");
-															}				
+<?php
+while ($row_history = $articles->fetch_assoc()) {
+	list($recv_dt, $due_dt) = msr_dates($row_history);
+	$assign_cepe = $show_alloc ? dbq_row("select full_name from users where id='" . (int) $row_history['assigned_user_id'] . "'") : array();
 
-		if($row_history['stage'] == "FP")
-		{
-			$due_dt = (date('d-m-Y',strtotime($row_history['due_dt'])));
-			$recv_dt = (date('d-m-Y',strtotime($row_history['recv_dt'])));
-			$manuscript_count = $row_history['manuscript_count'];
-		}
-		else
-		{
-			$due_dt = (date('d-m-Y',strtotime($row_history['due_date'])));
-			$recv_dt = (date('d-m-Y',strtotime($row_history['received_date'])));
-			$manuscript_count = $row_history['correction_pages'];
-		}
-		
-		$tr_class = '';
-		
-		$current_dateTimestamp1 = strtotime(date('d-m-Y')); 
-		$Due_dateTimestamp2 = strtotime($due_dt); 
-		if($row_history['highpriority'] == 1)
-		{
-			$tr_class = 'alert alert-info';
-		}
-		elseif(($row_history['status'] == 'Query') || ($row_history['status'] == 'Hold'))
-		{
-			$tr_class = 'alert alert-dark';
-		}
-		elseif($current_dateTimestamp1 > $Due_dateTimestamp2)
-		{
-			$tr_class = 'alert alert-danger';
-		}
-		
-                                                                        ?>
-                                                                        <tr class="<?php echo $tr_class;?>">
-                                                                            <td><?php echo h($row_history['cust_name']) ?></td>
-                                                                           
-                                                                            <td><?php echo h($row_history['book_short_name']) ?></td>
-                                                                            
-                                                                                <?php
-                                                                            if ($row_history['stage'] == 'FP') {
-                                                                              
-															if(($_REQUEST['dep_id']!=1) && ($_REQUEST['dep_id']!=2))
-															{
-															?>
-																				<td><?php echo h($row_history['stage']); ?></td>
-															<?php 
-															}
-															?>
-                                                                                <td><?php echo fmt_dt($row_history['recv_dt']) ?></td>
-																				
-																			<?php 
-															if(($_REQUEST['dep_id']!=1) && ($_REQUEST['dep_id']!=2))
-															{
-															?>
-                                                                                <td><?php echo fmt_dt($row_history['due_dt']) ?></td>
-															<?php 
-															}
-														
-                                                                            } elseif($stage_r=='REV') {
-                                                                               
-															if(($_REQUEST['dep_id']!=1) && ($_REQUEST['dep_id']!=2))
-															{
-															?>
-																				 <td><?php echo  "REV" . $row_history['revision_count'] ?></td>
-															<?php 
-															}
-															?>
-                                                                                <td><?php echo fmt_dt($row_history['received_date']) ?></td>
-
-																				
-																				<?php 
-															if(($_REQUEST['dep_id']!=1) && ($_REQUEST['dep_id']!=2))
-															{
-															?>
-                                                                                <td><?php echo fmt_dt($row_history['due_date']) ?></td>
-															<?php 
-															}
-															
-                                                                            }
-																			elseif($stage_i=='ISSCOR') {
-                                                                               
-															if(($_REQUEST['dep_id']!=1) && ($_REQUEST['dep_id']!=2))
-															{
-															?>
-																				 <td><?php echo h($row_history['stage']) ?></td>
-															<?php 
-															}
-															?>
-                                                                                <td><?php echo fmt_dt($row_history['created_dt']) ?></td>
-
-																				
-																				<?php 
-															if(($_REQUEST['dep_id']!=1) && ($_REQUEST['dep_id']!=2))
-															{
-															?>
-                                                                                <td><?php echo fmt_dt($row_history['due_dt']) ?></td>
-															<?php 
-															}
-															
-                                                                            }
-																			else {
-                                                                                
-															if(($_REQUEST['dep_id']!=1) && ($_REQUEST['dep_id']!=2))
-															{
-															?>
-																				 <td><?php echo h($row_history['stage']) ?></td>
-															<?php 
-															}
-															?>
-                                                                                <td><?php echo fmt_dt($row_history['received_date']) ?></td>
-
-																				<?php 
-															if(($_REQUEST['dep_id']!=1) && ($_REQUEST['dep_id']!=2))
-															{
-															?>
-                                                                                <td><?php echo fmt_dt($row_history['due_date']) ?></td>
-															<?php 
-															}
-															
-                                                                            }
-                                                                           
-															if($_REQUEST['dep_id']=='1' || $_REQUEST['dep_id']=='2')
-															{
-															?>
-															<td><?php echo h($assign_cepe['full_name']);?></td>
-															<td><?php echo fmt_dt($row_history['ce_pe_due_date']) ?></td>
-															<?php 
-															}
-															?>
-                                                                             <td>
-                                                                                <span class="label label-sm label-success"><?php echo h($row_history['status']); ?></span>
-        <?php
-        if ($transaction_toatl_count > 0) {
-            echo '<span class="label label-sm label-info">' . h($trans_res['full_name']) . '</span>|<span class="label label-sm label-warning">' . h($trans_res['current_status']) . '</span>';
-        }
-		if($num_acount>0 && $res_ac['comments']!='') 
-		{
-            echo '|<span class="label label-sm label-danger">' . h($res_ac['comments']) . '</span>';
-        }
-		elseif($num_acount>0 && $res_ac['comments']=='') 
-		{
-			echo '|<span class="label label-sm label-danger">No Comments</span>';
-		}
-        ?>
-                                                                            </td>
-                                                                                <td><?php if ($row_history['fig_complete_status'] == '1') { echo "Yes";}else{ echo 'No';}?></td>
-                                                                                
-
+	$due_ts = $due_dt ? strtotime($due_dt) : false;
+	$tr_class = '';
+	if (isset($row_history['highpriority']) && $row_history['highpriority'] == 1) {
+		$tr_class = 'alert alert-info';
+	} elseif ($row_history['status'] == 'Query' || $row_history['status'] == 'Hold') {
+		$tr_class = 'alert alert-dark';
+	} elseif ($due_ts && strtotime(date('Y-m-d')) > $due_ts) {
+		$tr_class = 'alert alert-danger';
+	}
+?>
+                                                                        <tr class="<?php echo $tr_class; ?>">
+                                                                            <td><?php echo h($row_history['cust_name']); ?></td>
+                                                                            <td><?php echo h($row_history['book_short_name']); ?></td>
+                                                                            <td><?php echo h(isset($row_history['digital_type']) ? $row_history['digital_type'] : ''); ?></td>
+                                                                            <td><?php echo h($row_history['stage']); ?></td>
+                                                                            <td><?php echo h(isset($row_history['manuscript_count']) ? $row_history['manuscript_count'] : ''); ?></td>
+                                                                            <td><?php echo h(isset($row_history['fig']) ? $row_history['fig'] : ''); ?></td>
+                                                                            <td><?php echo h(isset($row_history['tab']) ? $row_history['tab'] : ''); ?></td>
+                                                                            <td><?php echo fmt_dt($recv_dt); ?></td>
+                                                                            <td><?php echo fmt_dt($due_dt); ?></td>
+                                                                            <?php if ($show_alloc) { ?>
+                                                                                <td><?php echo h(isset($assign_cepe['full_name']) ? $assign_cepe['full_name'] : ''); ?></td>
+                                                                                <td><?php echo fmt_dt(isset($row_history['ce_pe_due_date']) ? $row_history['ce_pe_due_date'] : ''); ?></td>
+                                                                            <?php } ?>
+                                                                            <td><?php echo (int) $row_history['ccount']; ?></td>
+                                                                            <td><?php echo (int) $row_history['pcount']; ?></td>
+                                                                            <td><?php echo (int) $row_history['sccount']; ?></td>
+                                                                            <td><?php echo (int) $row_history['spcount']; ?></td>
+                                                                            <td><?php echo msr_status_html($row_history, true); ?></td>
                                                                         </tr>
-                                                                        <?php
-                                                                        //}
-                                                                        $i++;
-                                                                    }
-                                                                }
-                                                                ?>
-                                                            <?php  if($total_pages > $limit) { ?>
+<?php } ?>
+<?php if ($total_pages > $limit) { ?>
            	<tr>
             <td colspan="4">
             <div class="col-xs-12"><div class="dataTables_info" id="dynamic-table_info" role="status" aria-live="polite">Showing <?php echo ($start+1); ?> to <?php echo ($start+$limit > $total_pages) ? $total_pages : $start+$limit; ?> of <?php echo $total_pages; ?> entries</div></div>
             </td>
-					<td align="center" colspan="8" class="inactive"><div class="dataTables_paginate paging_simple_numbers" id="datatable_paginate">
+					<td align="center" colspan="10" class="inactive"><div class="dataTables_paginate paging_simple_numbers" id="datatable_paginate">
             <ul class="pagination">
               <?php paginate($start,$limit,$total_pages,$filePath,$otherParams); ?>
             </ul>
             </div></td>
 				  </tr>
-            <?php }?>
-</tbody>
-</table>
-                                                    </div>   
-													
-										<div >
+<?php } ?>
+                                                            </tbody>
+                                                        </table>
+                                                    </div>
+
+										<div>
                                                         <div class="page-header">
                                                             <h1>Consolidated-Report</h1>
                                                         </div>
-
+<?php
+$cons = dbq("SELECT c.id, c.cust_name,
+		COALESCE(SUM(wd.stage = 'FP'), 0) AS fp_count,
+		COALESCE(SUM(wd.stage LIKE 'REV%'), 0) AS rev_count,
+		COALESCE(SUM(wd.stage LIKE '%FIN%'), 0) AS fin_count
+	FROM adm_customer_master c
+	LEFT JOIN inw_conversion_dtl wd ON wd.cust_id = c.id AND wd.status NOT IN ('Client_Delivery','Delivery','Client Review','Completed') $searchfp $search_cy $search_cm $search_cd
+	WHERE 1 " . (($_REQUEST['cust_id'] != "" && $_REQUEST['cust_id'] != "all") ? " AND c.id = '" . esc($_REQUEST['cust_id']) . "'" : '') . "
+	GROUP BY c.id, c.cust_name ORDER BY c.cust_name");
+$cons_t = array(0, 0, 0);
+?>
                                                         <table class="table table-striped table-bordered table-hover " style="width: 70%; margin-top: 30px; margin-left: 160px;">
                                                             <thead>
                                                                 <tr>
@@ -1023,639 +925,193 @@ $customers = dbq($cnt_query);
                                                                 </tr>
                                                             </thead>
                                                             <tbody>
-<?php
-    if($_REQUEST['cust_id']!="" && $_REQUEST['cust_id']!="all")
-	{
-    $sql_query = "SELECT * FROM `adm_customer_master` where id='".esc($_REQUEST['cust_id'])."' ";
+<?php while ($cr_row = $cons->fetch_assoc()) {
+	if ($cr_row['fp_count'] + $cr_row['rev_count'] + $cr_row['fin_count'] == 0) {
+		continue; // customers without open projects are not listed
 	}
-	else
-	{
-    $sql_query = "SELECT * FROM `adm_customer_master`";
-	}
-    $run_row = dbq($sql_query);
-    while ($row = $run_row->fetch_assoc()) {
-
-		?>
-		  <tr>
-           <td rowspan="1"><?php echo h($row['cust_name']); ?> </td>
-		<?php 
-   
-            
-            
-            $fp_query = "SELECT count(id)as stage_count FROM `inw_book_dtl` WHERE cust_id =".$row['id']."  AND  stage = 'FP' AND status NOT IN ('Delivery','Client Review','Completed')   $searchfp $search_cy  $search_cm $search_cd ";
-            $fp_run_query = dbq($fp_query);
-            $fp_row = $fp_run_query->fetch_assoc();
-            $fp_id_count = $fp_row['stage_count'];
-
-            $rev_query = "SELECT count(id)as rev_count FROM `inw_book_dtl` WHERE cust_id =".$row['id']." AND status NOT IN ('Delivery','Client Review','Completed') AND stage LIKE 'REV%' $searchfp  $search_cy  $search_cm $search_cd";
-            //$rev_query = "SELECT stage as rev_count FROM `inw_inward_dtl` WHERE cust_id = $cust_ids AND j_id = $j_id Order by stage DESC limit 1 ";
-            $fev_run_query = dbq($rev_query);
-            $fev_row = $fev_run_query->fetch_assoc();
-            $fev_id_count = $fev_row['rev_count'];
-
-
-            $fin_query = "SELECT COUNT(id)as id FROM `inw_book_dtl` WHERE cust_id =".$row['id']." AND status NOT IN ('Delivery','Client Review','Completed') AND  stage LIKE '%FIN%' $searchfp $search_cy  $search_cm $search_cd";
-            $fin_run_query = dbq($fin_query);
-            $fin_row = $fin_run_query->fetch_assoc();
-            $fin_id_count = $fin_row['id'];
-		 
-
-                ?>
-                                                                              
-                                                                                    
-                                                                                    <td><?php echo  $fp_id_count; ?></td>
-                                                                                    <td><?php echo  $fev_id_count; ?></td>
-                                                                                    <td><?php echo  $fin_id_count; ?></td>
-                                                                                </tr>
-                <?php
-              
-            
-        
-    }
-//}
+	$cons_t[0] += $cr_row['fp_count'];
+	$cons_t[1] += $cr_row['rev_count'];
+	$cons_t[2] += $cr_row['fin_count'];
 ?>
-                                                            </tbody>
-                                                        </table>
-                                                    </div>			
-			<?php  } ?>
-													
-													 <?php
-													//echo h($_REQUEST['radio']);
-													if ($_REQUEST['radio']=='sfd') {
-															$today_date = date("Y-m-d");  /// today date
-														
-                                                      $query = "SELECT wd.id,wd.cust_id, wd.status, wd.due_dt,  wd.recv_dt, wd.book_short_name, wd.stage, wd.department_id FROM inw_book_dtl as wd WHERE   wd.status != 'Client Review'  AND wd.created_dt > '2020-03-01' AND wd.stage='FP' $cccb  $search $search2 ORDER BY wd.id desc";
-													  
-													 
-	$articledetails = dbq($query);
-	$filecount = 1;
-	if($articledetails->num_rows > 0 )
-	{
-													
-													
-
-												
-                                                    ?>   
-														<div class="page-header">
-                                                            <h1>First Proof Articles<b style="color:red;font-size:18px;"> - Total count :<?php echo $articledetails->num_rows;?></b></h1>
-                                                        </div>
-                                                    <div class="myTable1">
-														<div id="t_div">First Proof Articles</div>
-														
-                                                        <table class="table table-striped table-bordered table-hover">
-                                                            <thead>
-                                                            <th>Client </th>
-                                                            <th>Book Name</th>
-                                                            <th>Stage</th>
-                                                            <th>Received Date</th>
-                                                            <th>Due Date</th>
-															<th>Status</th>
-                                                            </thead>
-                                                            <tbody id="tbl1Body">
-                                                                <?php
-                                                                while ($article_info = $articledetails->fetch_assoc()) 
-		   {
-			   	/// Get the customers details ////
-				$query = "SELECT cust_name,cust_id,id FROM `adm_customer_master` WHERE id = '".$article_info['cust_id']."' ";
-				$customers = dbq($query);
-				$crow = $customers->fetch_assoc();
-				
-				
-				
-				
-				
-                // $query_disp = dbq_row("SELECT * FROM `inw_dispatch_history` WHERE a_id ='" . $article_info['id'] . "' ORDER BY `idh_id` DESC limit 1 ");
-				 
-				$send_dts = date('d-m-Y');
-                 $due_dts=date('d-m-Y', strtotime($article_info['due_dt']));
-				 
-				 $trans_sql = "SELECT u.full_name,t.current_status,t.id FROM `inw_transactions` as t,users as u WHERE t.process_user = u.id AND t.`project_id` = '".$article_info['id']."' AND t.created_dt > '2020-03-01'  AND t.current_status NOT IN ('Completed','Take Over') AND t.stage = '".$article_info['stage']."' AND ('Completed' != (select current_status from `inw_transactions` where `project_id` = '".$article_info['id']."' ORDER BY `id` DESC limit 1) )  ORDER BY t.`id` DESC limit 1;";
-		//echo $trans_sql.'<br>';		
-																			$chk_transaction = dbq($trans_sql); 
-																			$transaction_toatl_count=$chk_transaction->num_rows;
-																			$trans_res = $chk_transaction->fetch_assoc();
-                                                  ?>
-                                                                        <tr  <?php if (strtotime($send_dts) > strtotime($due_dts)) { echo "style='color:red;'";}?>>
-                                                                            <td><?php echo h($crow['cust_name']) ?></td>
-                                                                            
-                                                                            <td><?php echo h($article_info['book_short_name']) ?></td>
-                                                                           <td><?php echo h($article_info['stage']); ?></td>
-                                                                           <td><?php echo fmt_dt($article_info['recv_dt']) ?></td>
-                                                                            <td><?php echo fmt_dt($article_info['due_dt']) ?></td>
-																		
-                                                                            <td>    <span class="label label-sm label-success"><?php echo h($article_info['status']); ?></span>
-        <?php
-        if ($transaction_toatl_count > 0) {
-            echo '<span class="label label-sm label-info">' . h($trans_res['full_name']) . '</span>|<span class="label label-sm label-warning">' . h($trans_res['current_status']) . '</span>';
-        }
-        ?>
-                                                                            </td>
-
-                                                                        </tr>
-                                                                        <?php
-                                                                        
-                                                                    }
-                                                                ?>
-                                                            </tbody>
-                                                        </table>
-														
-														
-                                                    </div>  
-													
-													     <?php
-                                                                        
-                                                                }
-                                                                ?>
-													<?php 
-													 $querys = "SELECT wd.id,wd.cust_id, wd.book_short_name, wd.status, r.due_date, r.received_date, wd.pub_id, wd.stage, wd.department_id FROM inw_book_dtl as wd LEFT JOIN inw_book_revisions_dtl as r ON (wd.`id` =r.`b_id` and r.r_id = (select r_id from inw_book_revisions_dtl where b_id = wd.`id` order by r_id DESC limit 1))   WHERE   wd.status != 'Client Review'  AND  DATE_FORMAT(r.due_date,'%Y-%m-%d')<='" .$today_date."' AND r.created_on > '2020-03-01' AND wd.stage LIKE 'REV%' AND wd.id = r.b_id $cccb  $search1 $search2 $search3 GROUP BY r.b_id ORDER BY wd.cust_id ASC";
-													//echo $querys;
-	$articledetails = dbq($querys);
-	//echo  $articledetails->num_rows;
-	if($articledetails->num_rows > 0 )
-	{
-	?>													<div class="page-header">
-                                                            <h1>Revises Articles<b style="color:red;font-size:18px;"> - Total count :<?php echo $articledetails->num_rows;?></b></h1>
-                                                        </div>
-													 <div class="myTable1">
-														<div id="t_div">Revises Articles</div>
-                                                        <table class="table table-striped table-bordered table-hover">
-                                                            <thead>
-                                                            <th>Client </th>
-															<th>Book Name</th>
-                                                            <th>Stage</th>
-                                                            <th>Received Date</th>
-                                                            <th>Due Date</th>
-															<th>Status</th>
-                                                            </thead>
-                                                            <tbody id="tbl1Body">
-                                                                <?php
-                                                                while ($article_info = $articledetails->fetch_assoc()) 
-		   {
-			   	/// Get the customers details ////
-				$query = "SELECT cust_name,cust_id,id FROM `adm_customer_master` WHERE id = '".$article_info['cust_id']."' ";
-				$customers = dbq($query);
-				$crow = $customers->fetch_assoc();
-				
-				
-				
-				
-                  $send_dts = date('d-m-Y');
-                 $due_dts=date('d-m-Y', strtotime($article_info['due_date']));
-				 
-				  $trans_sql = "SELECT u.full_name,t.current_status,t.id FROM `inw_transactions` as t,users as u WHERE t.process_user = u.id AND t.`project_id` = '".$article_info['id']."' AND t.created_dt > '2020-03-01'  AND t.current_status NOT IN ('Completed','Take Over') AND t.stage = '".$article_info['stage']."' AND ('Completed' != (select current_status from `inw_transactions` where `project_id` = '".$article_info['id']."' ORDER BY `id` DESC limit 1) )  ORDER BY t.`id` DESC limit 1;";
-		//echo $trans_sql.'<br>';		
-																			$chk_transaction = dbq($trans_sql); 
-																			$transaction_toatl_count=$chk_transaction->num_rows;
-																			$trans_res = $chk_transaction->fetch_assoc();
-                                                  ?>
-                                                                        <tr  <?php if (strtotime($send_dts) > strtotime($due_dts)) { echo "style='color:red;'";}?>>
-                                                                            <td><?php echo h($crow['cust_name']) ?></td>
-                                                                            
-                                                                            <td><?php echo h($article_info['book_short_name']) ?></td>
-                                                                           <td><?php echo h($article_info['stage']); ?></td>
-                                                                           <td><?php echo fmt_dt($article_info['received_date']) ?></td>
-                                                                            <td><?php echo fmt_dt($article_info['due_date']) ?></td>
-                                                                             <td>
-                                                                                <span class="label label-sm label-success"><?php echo h($article_info['status']); ?></span>
-        <?php
-        if ($transaction_toatl_count > 0) {
-            echo '<span class="label label-sm label-info">' . h($trans_res['full_name']) . '</span>|<span class="label label-sm label-warning">' . h($trans_res['current_status']) . '</span>';
-        }
-        ?>
-                                                                            </td>
-
-                                                                        </tr>
-                                                                          <?php
-                                                                        
-                                                                    }
-                                                                ?>
-                                                            </tbody>
-                                                        </table>
-														
-														
-                                                    </div>  
-													
-													     <?php
-                                                                        
-                                                                }
-                                                                ?>
-														
-														
-														
-															<?php 
-													 $querys = "SELECT wd.id,wd.cust_id, wd.book_short_name, wd.status, r.due_date, r.received_date, wd.pub_id, wd.stage, wd.department_id FROM inw_book_dtl as wd LEFT JOIN inw_book_revisions_dtl as r ON (wd.`id` =r.`b_id` and r.r_id = (select r_id from inw_book_revisions_dtl where b_id = wd.`id` order by r_id DESC limit 1))   WHERE    wd.status != 'Client Review' AND DATE_FORMAT(r.due_date,'%Y-%m-%d')<='" .$today_date."' AND r.created_on > '2020-03-01' AND wd.stage LIKE 'FIN%' AND wd.id = r.b_id $cccb  $search1 $search2 $search3 GROUP BY r.b_id ORDER BY wd.cust_id ASC";
-													
-	$articledetails = dbq($querys);
-	//echo  $articledetails->num_rows;
-	if($articledetails->num_rows > 0 )
-	{
-	?>													<div class="page-header">
-                                                            <h1>Finals Articles<b style="color:red;font-size:18px;"> - Total count :<?php echo $articledetails->num_rows;?></b></h1>
-                                                        </div>
-													 <div class="myTable1">
-														<div id="t_div">Finals Articles</div>
-                                                        <table class="table table-striped table-bordered table-hover">
-                                                            <thead>
-                                                            <th>Client </th>
-															<th>Book Name</th>
-                                                            <th>Stage</th>
-                                                            <th>Received Date</th>
-                                                            <th>Due Date</th>
-															<th>Status</th>
-                                                            </thead>
-                                                            <tbody id="tbl1Body">
-                                                                <?php
-                                                                while ($article_info = $articledetails->fetch_assoc()) 
-		   {
-			   	/// Get the customers details ////
-				$query = "SELECT cust_name,cust_id,id FROM `adm_customer_master` WHERE id = '".$article_info['cust_id']."' ";
-				$customers = dbq($query);
-				$crow = $customers->fetch_assoc();
-				
-				
-				
-                  $send_dts = date('d-m-Y');
-                 $due_dts=date('d-m-Y', strtotime($article_info['due_date']));
-				 
-				  $trans_sql = "SELECT u.full_name,t.current_status,t.id FROM `inw_transactions` as t,users as u WHERE t.process_user = u.id AND t.`project_id` = '".$article_info['id']."' AND t.created_dt > '2020-03-01'  AND t.current_status NOT IN ('Completed','Take Over') AND t.stage = '".$article_info['stage']."' AND ('Completed' != (select current_status from `inw_transactions` where `project_id` = '".$article_info['id']."' ORDER BY `id` DESC limit 1) )  ORDER BY t.`id` DESC limit 1;";
-		//echo $trans_sql.'<br>';		
-																			$chk_transaction = dbq($trans_sql); 
-																			$transaction_toatl_count=$chk_transaction->num_rows;
-																			$trans_res = $chk_transaction->fetch_assoc();
-                                                  ?>
-                                                                        <tr  <?php if (strtotime($send_dts) > strtotime($due_dts)) { echo "style='color:red;'";}?>>
-                                                                            <td><?php echo h($crow['cust_name']) ?></td>
-                                                                            
-                                                                            <td><?php echo h($article_info['book_short_name']) ?></td>
-                                                                           <td><?php echo h($article_info['stage']); ?></td>
-                                                                           <td><?php echo fmt_dt($article_info['received_date']) ?></td>
-                                                                            <td><?php echo fmt_dt($article_info['due_date']) ?></td>
-                                                                              <td>
-                                                                                <span class="label label-sm label-success"><?php echo h($article_info['status']); ?></span>
-        <?php
-        if ($transaction_toatl_count > 0) {
-            echo '<span class="label label-sm label-info">' . h($trans_res['full_name']) . '</span>|<span class="label label-sm label-warning">' . h($trans_res['current_status']) . '</span>';
-        }
-        ?>
-                                                                            </td>
-
-                                                                        </tr>
-                                                                          <?php
-                                                                        
-                                                                    }
-                                                                ?>
-                                                            </tbody>
-                                                        </table>
-														
-														
-                                                    </div>  
-													
-													     <?php
-                                                                        
-                                                                }
-													}
-													
-													if ($_REQUEST['radio']=='dp') {
-														?>
-														
-													
-														<table class="table table-striped table-bordered table-hover">
-      <tbody>
-        <tr>
-          <td class=""><?php
-	$zero_cust=array();
-    $sql_query = "SELECT * FROM `adm_customer_master`";	
-    $run_row = dbq($sql_query);	
-    while ($row = $run_row->fetch_assoc()) 
-	{		
-        
-		 
-			
-			
-			$cnt_query = "SELECT COUNT(wd.idh_id) as sent_count FROM inw_dispatch_history as wd, `inw_inward_dtl` as wdd, adm_customer_master as c, adm_journals as j WHERE wd.cust_id = c.id and wd.j_id = j.j_id and wd.a_id = wdd.id  AND wdd.cust_id = ".$row['id']."  $ccc  $search $search2 $search4";			
-			
-            $fp_run_query = dbq($cnt_query);
-            $fp_row = $fp_run_query->fetch_assoc();
-            $sent_count = $fp_row['sent_count'];
-			if($sent_count>0)
-			{
-			?>
-            <p class="col-md-2" style="color:<?php echo $row['font_color'];?> !important;"> <?php echo h($row['cust_name']); ?> - <?php echo  $sent_count; ?></p>
-            <?php  
-			}
-			else
-			{ 
-			$zero_cust[]=$row['id'];
-			}			
-    }
-?>
-<?php  $implode = implode(',', $zero_cust);?>
-</td>
-        </tr>
-      </tbody>
-    </table>
-	<table class="table table-striped table-bordered table-hover">
-      <tbody>
-        <tr>
-          <td class=""><?php
-	
-    $sql_query = "SELECT * FROM `adm_customer_master` where FIND_IN_SET(id,'".$implode."')";	
-    $run_row = dbq($sql_query);	
-    while ($row = $run_row->fetch_assoc()) 
-	{		
-        
-		 
-			
-			
-			$cnt_query = "SELECT COUNT(wd.idh_id) as sent_count FROM inw_dispatch_history as wd, `inw_inward_dtl` as wdd, adm_customer_master as c, adm_journals as j WHERE wd.cust_id = c.id and wd.j_id = j.j_id and wd.a_id = wdd.id  AND wdd.cust_id = ".$row['id']."  $ccc  $search $search2 $search4";			
-			
-            $fp_run_query = dbq($cnt_query);
-            $fp_row = $fp_run_query->fetch_assoc();
-            $sent_count = $fp_row['sent_count'];
-			if($sent_count==0)
-			{
-			?>
-            <p class="col-md-2" style="color:<?php echo $row['font_color'];?> !important;"> <?php echo h($row['cust_name']); ?> - <?php echo  $sent_count; ?></p>
-            <?php  
-			}
-			?>
-            <?php        
-    }
-?></td>
-        </tr>
-      </tbody>
-    </table>
-														<?php 
-														  $_REQUEST['radio'];
-                                                            $query = "SELECT *,c.cust_name,j.j_code from inw_dispatch_history as wd, adm_customer_master as c, adm_journals as j WHERE wd.cust_id = c.id and wd.j_id = j.j_id  $ccc  $search $search2 $search4 ";
-														
-														$cnt_query = "SELECT COUNT(wd.a_id) as num from inw_dispatch_history as wd,adm_customer_master as c, adm_journals as j WHERE wd.cust_id = c.id and wd.j_id = j.j_id  $ccc  $search $search2  $search4 ";
-														
-															 $customers = dbq($cnt_query);
-													 $page_count = $customers->fetch_assoc();
-												 	 $total_pages = isset($page_count['num']) ? (int) $page_count['num'] : 0;
-													$order_by = "ORDER BY `idh_id` DESC";
-													$start = max(0, (int) $_REQUEST['start']);
-		
-										$filePath = $self . '?page=1&' . msr_qs($filePathKeys);
-													 $limit =10; //how many items to show per page
-													
-													 $query = $query. $order_by." LIMIT $start, $limit";  
-													//echo $query;
-													$articles = dbq($query);	
-                                                     $articles->num_rows;
-													//echo "fdgfdg".$total_pages;
-                                                   
-													
-													
-
-												
-                                                    ?>   
-														<?php if ($total_pages == 0) { ?>
-<div class="alert alert-warning" style="margin-top:15px;">No delivery records found. <b>Delivery Performance still reads the journal dispatch tables</b> (<code>inw_dispatch_history</code> / <code>adm_journals</code>), not the book tables, so it stays empty until it is pointed at the book dispatch table. Run <code>debug_master_status_report.php</code> (section 5) to check.</div>
+                                                                <tr>
+                                                                    <td><?php echo h($cr_row['cust_name']); ?></td>
+                                                                    <td><?php echo (int) $cr_row['fp_count']; ?></td>
+                                                                    <td><?php echo (int) $cr_row['rev_count']; ?></td>
+                                                                    <td><?php echo (int) $cr_row['fin_count']; ?></td>
+                                                                </tr>
 <?php } ?>
-<div class="page-header">
-                                                            <h1>Delivery Performance Report <b style="color:red;font-size:14px;"> - Total count :<?php echo $total_pages;?></b> <a href="download-excel-dp-report.php?<?php echo h(msr_qs(array('cust_id', 'j_id', 'stage_id', 'dp_platform', 'radio', 'from_dt', 'to_dt', 'mfrom_dt', 'yfrom_dt', 'date_wise'))); ?>" class="btn btn-primary">Download Excel </a></h1>
+                                                                <tr>
+                                                                    <td><b style="color:red;">Total</b></td>
+                                                                    <td><b style="color:red;"><?php echo $cons_t[0]; ?></b></td>
+                                                                    <td><b style="color:red;"><?php echo $cons_t[1]; ?></b></td>
+                                                                    <td><b style="color:red;"><?php echo $cons_t[2]; ?></b></td>
+                                                                </tr>
+                                                            </tbody>
+                                                        </table>
+                                                    </div>
+<?php } ?>
+
+<?php ?><?php
+													if ($_REQUEST['radio']=='sfd') {
+														$today_date = ($_REQUEST['sdf_dt'] != '') ? date('Y-m-d', strtotime($_REQUEST['sdf_dt'])) : date('Y-m-d');
+														$sfd_base = "FROM inw_conversion_dtl as wd JOIN adm_customer_master as c ON c.id = wd.cust_id
+															LEFT JOIN inw_conversion_revisions_dtl as r ON (wd.`id` = r.`b_id` AND r.r_id = (SELECT MAX(r2.r_id) FROM inw_conversion_revisions_dtl as r2 WHERE r2.b_id = wd.`id`))
+															WHERE wd.status NOT IN ('Client_Delivery','Delivery','Client Review','Completed') AND wd.created_dt > '2020-03-01' ";
+														$sfd_cols = "SELECT wd.id, wd.cust_id, c.cust_name, wd.status, wd.stage, wd.book_short_name, wd.recv_dt, wd.due_dt, r.received_date, r.due_date ";
+														$sfd_sets = array(
+															'First Proof Projects' => $sfd_cols . $sfd_base . " AND wd.stage='FP' $cccb $search $search2 ORDER BY wd.id desc",
+															'Revises Projects' => $sfd_cols . $sfd_base . " AND wd.stage LIKE 'REV%' AND DATE_FORMAT(r.due_date,'%Y-%m-%d')<='" . $today_date . "' $cccb $search2 ORDER BY wd.cust_id ASC",
+															'Finals Projects' => $sfd_cols . $sfd_base . " AND wd.stage LIKE 'FIN%' AND DATE_FORMAT(r.due_date,'%Y-%m-%d')<='" . $today_date . "' $cccb $search2 ORDER BY wd.cust_id ASC",
+														);
+														foreach ($sfd_sets as $sfd_title => $sfd_sql) {
+															$sfd_rows = dbq($sfd_sql);
+															if ($sfd_rows->num_rows == 0) {
+																continue;
+															}
+?>
+														<div class="page-header">
+                                                            <h1><?php echo h($sfd_title); ?><b style="color:red;font-size:18px;"> - Total count :<?php echo (int) $sfd_rows->num_rows; ?></b></h1>
                                                         </div>
                                                     <div class="myTable1">
-
+														<div id="t_div"><?php echo h($sfd_title); ?></div>
                                                         <table class="table table-striped table-bordered table-hover">
                                                             <thead>
-                                                            <th>Client </th>
-                                                            <th>Journal Name</th>
-                                                            <th>FileName</th>
+                                                            <tr>
+                                                            <th>Client</th>
+                                                            <th>Project Name</th>
                                                             <th>Stage</th>
                                                             <th>Received Date</th>
                                                             <th>Due Date</th>
-															<th>Dispatched Date</th>
-															<th>Page count</th>
-                                                            <th>Schedule</th>                                                           
-                                                            <th>Job Card</th>   
-															</thead>
-                                                            <tbody id="tbl1Body">
-                                                                <?php
-                                                                if ($articles->num_rows > 0) {
-                                                                    ?>
-                                                                    <?php
-                                                                    while ($row_history = $articles->fetch_assoc()) {
-																		
-																		$stage_r=preg_replace("/REV([0-9]+)/","REV",$row_history['stage']);
-																		$stage_i=preg_replace("/ISSCOR([0-9]+)/","ISSCOR",$row_history['stage']);
-                                                                        //print_r($row_history);
-																		
-																	
-		
-		$query_disp = dbq_row("SELECT * FROM `inw_inward_dtl` WHERE id ='" . $row_history['a_id'] . "'");
-		
-		
-		if($stage_r != 'REV')
-		{
-			$due_dt = (date('d-m-Y',strtotime($query_disp['due_dt'])));
-			$recv_dt = (date('d-m-Y',strtotime($query_disp['recv_dt'])));
-			$manuscript_count = $query_disp['manuscript_count'];
-			$pg_count = $query_disp['page_count'];
-		}
-		else
-		{
-			 $rev_rep=str_replace("REV","",$row_history['stage']);
-			$query = "SELECT * FROM inw_revisions_dtl WHERE inw_id = '".$row_history['a_id']."' and revision_count='".$rev_rep."'";
-		    $revin = dbq($query);
-		    $revinfo = $revin->fetch_assoc();
-			$due_dt = (date('d-m-Y',strtotime($revinfo['due_date'])));
-			$recv_dt = (date('d-m-Y',strtotime($revinfo['received_date'])));
-			//$manuscript_count = $revinfo['correction_pages'];
-			$pg_count = $revinfo['correction_pages'];
-		}
-																			//$chk_transaction = dbq($trans_sql); 
-																			//$transaction_toatl_count=$chk_transaction->num_rows;
-																			//$trans_res = $chk_transaction->fetch_assoc();	
-                                                                        $send_dt = date('d-m-Y', strtotime($row_history['sent_date']));
-                                                                        $send_dts = date('d-m-Y', strtotime($row_history['sent_date']));
-                                                                        ?>
-                                                                        <tr>
-                                                                            <td><?php echo h($row_history['cust_name']) ?></td>
-                                                                            <td><?php echo h($row_history['j_code']) ?></td>
-                                                                            <td><?php echo h($query_disp['pub_id']) ?></td>
-                                                                            
-                                                                                <?php
-                                                                            if ($row_history['stage'] == 'FP') {
-																				$due_dts=date('d-m-Y', strtotime($due_dt));
-                                                                                ?>
-																				<td><?php echo h($row_history['stage']); ?></td>
-                                                                                <td><?php echo fmt_dt($recv_dt) ?></td>
-                                                                                <td><?php echo fmt_dt($due_dt) ?></td>
-                                                                                <?php
-                                                                            } elseif($stage_r=='REV') {
-																				
-																				$due_dts=date('d-m-Y', strtotime($due_dt));
-                                                                                ?>
-																				<td><?php echo h($row_history['stage']); ?></td>
-                                                                                 <td><?php echo fmt_dt($recv_dt) ?></td>
-                                                                                <td><?php echo fmt_dt($due_dt) ?></td>
-                                                                                <?php
-                                                                            }
-																			elseif($stage_i=='ISSCOR') {
-																				
-																				$due_dts=date('d-m-Y', strtotime($due_dt));
-                                                                                ?>
-																				 <td><?php echo h($row_history['stage']) ?></td>
-                                                                                <td><?php echo fmt_dt($query_disp['created_dt']); ?></td>
-
-                                                                                <td><?php echo fmt_dt($query_disp['due_dt']); ?></td>
-                                                                                <?php
-                                                                            }
-																			else{
-																				
-																				$due_dts=date('d-m-Y', strtotime($due_dt));
-                                                                                ?>
-																				 <td><?php echo h($row_history['stage']) ?></td>
-                                                                                <td><?php echo fmt_dt($query_disp['created_dt']) ?></td>
-
-                                                                                <td><?php echo fmt_dt($query_disp['due_dt']) ?></td>
-                                                                                <?php
-                                                                            }
-																			
-                                                                            ?>
-
-                                                                             <td><?php echo $send_dt; ?></td>
-																																																							<td><?php echo $pg_count; ?></td>
-
-                                                                            <td>	<?php
-                                                                  if (strtotime($send_dts) == strtotime($due_dts)) {
-                                                                    $l++;
-
-                                                                    echo "On Time";
-																	
-                                                                } elseif (strtotime($send_dts) > strtotime($due_dts)) {
-                                                                    $j++;
-                                                                    echo "Delay";
-                                                                } elseif (strtotime($send_dts) < strtotime($due_dts)) {
-                                                                    $k++;
-                                                                    echo "Ahead";
-                                                                }
-															     	
-                                                                        ?>
-                                                                            </td>
-                    <td><a title="Job Card" href="job_card.php?id=<?php echo $query_disp['id']; ?>" target="_blank" class="btn btn-xs btn-info"><i class="ace-icon fa fa-clock-o bigger-120"></i></a> </td> 
-
+                                                            <th>Status</th>
+                                                            </tr>
+                                                            </thead>
+                                                            <tbody>
+<?php
+															while ($a = $sfd_rows->fetch_assoc()) {
+																list($recv_dt, $due_dt) = msr_dates($a);
+																$overdue = ($due_dt && strtotime($due_dt) < strtotime($today_date));
+?>
+                                                                        <tr <?php if ($overdue) { echo "style='color:red;'"; } ?>>
+                                                                            <td><?php echo h($a['cust_name']); ?></td>
+                                                                            <td><?php echo h($a['book_short_name']); ?></td>
+                                                                            <td><?php echo h($a['stage']); ?></td>
+                                                                            <td><?php echo fmt_dt($recv_dt); ?></td>
+                                                                            <td><?php echo fmt_dt($due_dt); ?></td>
+                                                                            <td><?php echo msr_status_html($a, false); ?></td>
                                                                         </tr>
-                                                                        <?php
-                                                                        $i++;
-                                                                    }
-                                                                }
-																	
-																	
-																
-															
-                                                                ?>
-                                                         
-														
-														 <?php  if($total_pages > $limit) { ?>
+<?php } ?>
+                                                            </tbody>
+                                                        </table>
+                                                    </div>
+<?php
+														}
+													}
+?>
+<?php
+													if ($_REQUEST['radio']=='dp') {
+														if ($dcol == '') {
+?>
+<div class="alert alert-warning" style="margin-top:15px;"><b>Delivery Performance needs the delivery date column of <code>inw_conversion_dtl</code>.</b> None of the expected columns (<code>sent_date, delivery_dt, delivered_dt, delivery_date, delivered_date, client_delivery_dt, completed_dt, completed_date</code>) exists. Run <code>debug_master_status_report.php</code> to see the table's columns, then tell me which one holds the client delivery date.</div>
+<?php
+														} else {
+															$dexpr = "wd." . $dcol;
+															$dp_from = "FROM inw_conversion_dtl wd JOIN adm_customer_master c ON wd.cust_id = c.id
+																LEFT JOIN inw_conversion_revisions_dtl r ON (wd.`id` = r.`b_id` AND r.r_id = (SELECT MAX(r2.r_id) FROM inw_conversion_revisions_dtl r2 WHERE r2.b_id = wd.`id`))
+																WHERE wd.status IN ('Client_Delivery','Delivery','Client Review','Completed') $cccb $search $search2 $search4";
+															$due_expr = "IF(wd.stage LIKE 'REV%' AND r.due_date IS NOT NULL, r.due_date, wd.due_dt)";
+
+															// dispatched count per customer
+															$per_cust = dbq("SELECT c.cust_name, c.font_color, COUNT(wd.id) AS sent_count " . $dp_from . " GROUP BY c.id, c.cust_name, c.font_color ORDER BY c.cust_name");
+?>
+													<table class="table table-striped table-bordered table-hover">
+      <tbody>
+        <tr>
+          <td class="">
+<?php while ($pc = $per_cust->fetch_assoc()) { ?>
+            <p class="col-md-2" style="color:<?php echo h($pc['font_color']); ?> !important;"> <?php echo h($pc['cust_name']); ?> - <?php echo (int) $pc['sent_count']; ?></p>
+<?php } ?>
+          </td>
+        </tr>
+      </tbody>
+    </table>
+<?php
+															// totals for the charts
+															$tot = dbq("SELECT COUNT(*) AS total, COALESCE(SUM(DATE(sentdt) < DATE(due)),0) AS ahead, COALESCE(SUM(DATE(sentdt) = DATE(due)),0) AS ontime, COALESCE(SUM(DATE(sentdt) > DATE(due)),0) AS delay FROM (SELECT $dexpr AS sentdt, $due_expr AS due " . $dp_from . ") x")->fetch_assoc();
+															$total_pages = (int) $tot['total'];
+															$ahead = (int) $tot['ahead'];
+															$ontime = (int) $tot['ontime'];
+															$delay = (int) $tot['delay'];
+															$k = $ahead; $l = $ontime; $j = $delay;
+
+															$start = max(0, (int) $_REQUEST['start']);
+															$filePath = $self . '?page=1&' . msr_qs($filePathKeys);
+															$limit = 10; //how many items to show per page
+															$articles = dbq("SELECT wd.id, wd.book_short_name, wd.stage, wd.recv_dt, wd.due_dt, wd.manuscript_count, wd.digital_type, c.cust_name, r.received_date, r.due_date, $dexpr AS sent_date " . $dp_from . " ORDER BY wd.id DESC LIMIT $start, $limit");
+?>
+														<div class="page-header">
+                                                            <h1>Delivery Performance Report <b style="color:red;font-size:14px;"> - Total count :<?php echo $total_pages; ?></b> <a href="download-excel-dp-report.php?<?php echo h(msr_qs(array('cust_id', 'j_id', 'stage_id', 'radio', 'from_dt', 'to_dt', 'mfrom_dt', 'yfrom_dt', 'date_wise'))); ?>" class="btn btn-primary">Download Excel </a></h1>
+                                                        </div>
+                                                    <div class="myTable1">
+                                                        <table class="table table-striped table-bordered table-hover">
+                                                            <thead>
+                                                            <tr>
+                                                            <th>Client</th>
+                                                            <th>Project Name</th>
+                                                            <th>Work Type</th>
+                                                            <th>Stage</th>
+                                                            <th>Received Date</th>
+                                                            <th>Due Date</th>
+                                                            <th>Dispatched Date</th>
+                                                            <th>Page count</th>
+                                                            <th>Schedule</th>
+                                                            <th>Details</th>
+                                                            </tr>
+                                                            </thead>
+                                                            <tbody id="tbl1Body">
+<?php
+while ($row_history = $articles->fetch_assoc()) {
+	list($recv_dt, $due_dt) = msr_dates($row_history);
+	$sent_ts = $row_history['sent_date'] ? strtotime(date('Y-m-d', strtotime($row_history['sent_date']))) : false;
+	$due_ts = $due_dt ? strtotime(date('Y-m-d', strtotime($due_dt))) : false;
+	if (!$sent_ts || !$due_ts) {
+		$sched = '-';
+	} elseif ($sent_ts == $due_ts) {
+		$sched = 'On Time';
+	} elseif ($sent_ts > $due_ts) {
+		$sched = 'Delay';
+	} else {
+		$sched = 'Ahead';
+	}
+?>
+                                                                        <tr>
+                                                                            <td><?php echo h($row_history['cust_name']); ?></td>
+                                                                            <td><?php echo h($row_history['book_short_name']); ?></td>
+                                                                            <td><?php echo h($row_history['digital_type']); ?></td>
+                                                                            <td><?php echo h($row_history['stage']); ?></td>
+                                                                            <td><?php echo fmt_dt($recv_dt); ?></td>
+                                                                            <td><?php echo fmt_dt($due_dt); ?></td>
+                                                                            <td><?php echo fmt_dt($row_history['sent_date']); ?></td>
+                                                                            <td><?php echo h($row_history['manuscript_count']); ?></td>
+                                                                            <td><?php echo $sched; ?></td>
+                                                                            <td><a title="Project details" href="show_conversion_projects.php?id=<?php echo (int) $row_history['id']; ?>" target="_blank" class="btn btn-xs btn-info"><i class="ace-icon fa fa-clock-o bigger-120"></i></a></td>
+                                                                        </tr>
+<?php } ?>
+<?php if ($total_pages > $limit) { ?>
            	<tr>
             <td colspan="4">
             <div class="col-xs-12"><div class="dataTables_info" id="dynamic-table_info" role="status" aria-live="polite">Showing <?php echo ($start+1); ?> to <?php echo ($start+$limit > $total_pages) ? $total_pages : $start+$limit; ?> of <?php echo $total_pages; ?> entries</div></div>
             </td>
-					<td align="center" colspan="8" class="inactive"><div class="dataTables_paginate paging_simple_numbers" id="datatable_paginate">
+					<td align="center" colspan="6" class="inactive"><div class="dataTables_paginate paging_simple_numbers" id="datatable_paginate">
             <ul class="pagination">
               <?php paginate($start,$limit,$total_pages,$filePath,$otherParams); ?>
             </ul>
             </div></td>
 				  </tr>
-														 <?php } ?>
-				  
-				     </tbody>
+<?php } ?>
+                                                            </tbody>
                                                         </table>
-            <?php
-			
-		 	 $query_graph = dbq("SELECT *,c.cust_name,j.j_code from inw_dispatch_history as wd, adm_customer_master as c, adm_journals as j WHERE wd.cust_id = c.id and wd.j_id = j.j_id  $ccc  $search $search2 $search4 ");
-			 while($res_graph=$query_graph->fetch_array())
-			 {
-				 
-				 
-				$stage_gr=preg_replace("/REV([0-9]+)/","REV",$res_graph['stage']);
-				$stage_gi=preg_replace("/ISSCOR([0-9]+)/","ISSCOR",$res_graph['stage']);
-																		
-		
-		//$query_dispgraph = dbq_row("SELECT * FROM `inw_dispatch_history` WHERE a_id ='" . $res_graph['id'] . "' ORDER BY `idh_id` DESC limit 1 ");
-		$query_dispgraph = dbq_row("SELECT * FROM `inw_inward_dtl` WHERE id ='" . $res_graph['a_id'] . "'");
-
-         $send_dts = date('d-m-Y', strtotime($res_graph['sent_date']));
-		 
-		 	if($res_graph['stage'] == "FP")
-		{
-			$due_dt = (date('d-m-Y',strtotime($query_dispgraph['due_dt'])));
-		}
-		elseif($stage_gr=='REV')
-		{
-			$rev_rep=str_replace("REV","",$res_graph['stage']);
-			$query = "SELECT * FROM inw_revisions_dtl WHERE inw_id = '".$res_graph['a_id']."' and revision_count='".$rev_rep."'";
-		    $revin = dbq($query);
-		    $revinfo = $revin->fetch_assoc();
-			$due_dt = (date('d-m-Y',strtotime($revinfo['due_date'])));
-			
-		}
-		else
-		{
-			
-			$due_dt = (date('d-m-Y',strtotime($query_dispgraph['due_dt'])));
-			
-		}
-				 
-																				if ($res_graph['stage'] == 'FP') {
-																				$due_dts=date('d-m-Y', strtotime($due_dt));
-                                                                                ?>
-																			
-                                                                                <?php
-                                                                            } elseif($stage_gr=='REV') {
-																				
-																				$due_dts=date('d-m-Y', strtotime($due_dt));
-                                                                                ?>
-																				
-                                                                                <?php
-                                                                            }
-																			elseif($stage_gi=='ISSCOR') {
-																				
-																				$due_dts=date('d-m-Y', strtotime($due_dt));
-                                                                                ?>
-																				
-                                                                                <?php
-                                                                            }
-																			else{
-																				
-																				$due_dts=date('d-m-Y', strtotime($due_dt));
-                                                                                ?>
-																			
-                                                                                <?php
-                                                                            }
-				 
-				
-																
-																
-																  if (strtotime($send_dts) == strtotime($due_dts)) {
-                                                                    $lg++;
-
-																	
-                                                                } elseif (strtotime($send_dts) > strtotime($due_dts)) {
-                                                                    $jg++;
-                                                                } elseif (strtotime($send_dts) < strtotime($due_dts)) {
-                                                                    $kg++;
-                                                                }
-																	
-			} 
-																	$ahead=$kg;
-																	$delay=$jg;
-																	$ontime=$lg;
-																	 
-			?>
-			
-			
-
-                                                    </div>  
-													
-													
-
-													
-													<!-- Styles -->
+                                                    </div>
+<!-- Styles -->
 <style>
 #chartdiv {
   width: 100%;
@@ -1845,176 +1301,36 @@ columnTemplate.strokeOpacity = 1;
 }); // end am4core.ready()
 </script>
 
-<!-- HTML -->
-										
-													 <?php }  ?>
+
+<?php
+														}
+													}
+?>
+
 													
 
-														 <?php
-													//echo h($_REQUEST['radio']);
-													if ($_REQUEST['radio']=='dr') {
-                                                        $query = "SELECT c.cust_name,journal_title,pub_id,recv_dt,due_dt,highpriority,wd.created_dt,fig,tab,status,approved_by,wd.id,j.j_code,manuscript_count,stage,r.received_date,r.due_date,r.correction_pages,r.revision_count FROM `inw_inward_dtl` as wd LEFT JOIN inw_revisions_dtl as r ON (wd.`id` =r.`inw_id` and r.r_id = (select r_id from inw_revisions_dtl where inw_id = wd.`id` order by r_id DESC limit 1)), adm_customer_master as c, adm_journals as j WHERE wd.cust_id = c.id and wd.j_id = j.j_id  AND wd.status IN ('Client Review') and wd.v_issue_id <= 0 $ccc  $search1 $search2 $search4 ";
-														
-														$cnt_query = "SELECT COUNT(wd.id) as num,c.cust_name,journal_title,pub_id,recv_dt,due_dt,highpriority,wd.created_dt,fig,tab,status,approved_by,wd.id,j.j_code,manuscript_count,stage,r.received_date,r.due_date,r.correction_pages,r.revision_count FROM `inw_inward_dtl` as wd LEFT JOIN inw_revisions_dtl as r ON (wd.`id` =r.`inw_id` and r.r_id = (select r_id from inw_revisions_dtl where inw_id = wd.`id` order by r_id DESC limit 1)), adm_customer_master as c, adm_journals as j WHERE wd.cust_id = c.id and wd.j_id = j.j_id AND wd.status IN ('Client Review') and wd.v_issue_id <= 0 $ccc  $search1 $search2 $search4";
-														
-															$customers = dbq($cnt_query);
-													$page_count = $customers->fetch_assoc();
-													$total_pages = isset($page_count['num']) ? (int) $page_count['num'] : 0;
-													$order_by = "ORDER BY `id` DESC";
-													$start = max(0, (int) $_REQUEST['start']);
-		
-										$filePath = $self . '?page=1&' . msr_qs($filePathKeys);
-													$limit =10; //how many items to show per page
-													
-													$query = $query. $order_by." LIMIT $start, $limit";  
-													//echo $query;
-													$articles = dbq($query);	
-                                                    $articles->num_rows;
-													//echo "fdgfdg".$total_pages;
-                                                   
-													
-													
-
-												
-                                                    ?>   
-														<div class="page-header">
-                                                            <h1>Detailed Report</h1>
-                                                        </div>
-                                                    <div class="myTable1">
-
-                                                        <table class="table table-striped table-bordered table-hover">
-                                                            <thead>
-                                                            <th>Client </th>
-                                                            <th>Journal Name</th>
-                                                                                                                        <th>FileName</th>
-                                                            <th>Stage</th>
-                                                            <th>Received Date</th>
-                                                            <th>Due Date</th>
-															<th>Dispatched Date</th>
-                                                            <th>Schedule</th>    
-															<th>Job Card</th>    			
-												</thead>
-                                                            <tbody id="tbl1Body">
-                                                                <?php
-                                                                if ($articles->num_rows > 0) {
-                                                                    ?>
-                                                                    <?php
-                                                                    while ($row_history = $articles->fetch_assoc()) {
-																		
-																		$stage_r=preg_replace("/REV([0-9]+)/","REV",$row_history['stage']);
-																		$stage_i=preg_replace("/ISSCOR([0-9]+)/","ISSCOR",$row_history['stage']);
-                                                                        //print_r($row_history);
-																		
-																		$trans_sql = "SELECT u.full_name,t.current_status,t.id FROM `inw_transactions` as t,users as u WHERE t.process_user = u.id AND t.`project_id` = '".$row_history['id']."'  AND t.current_status NOT IN ('Completed','Take Over') AND t.stage = '".$row_history['stage']."' AND ('Completed' != (select current_status from `inw_transactions` where `project_id` = '".$row_history['id']."' ORDER BY `id` DESC limit 1) )  ORDER BY t.`id` DESC limit 1;";
-		//echo $trans_sql.'<br>';		
-		
-		$query_disp = dbq_row("SELECT * FROM `inw_dispatch_history` WHERE a_id ='" . $row_history['id'] . "' ORDER BY `idh_id` DESC limit 1 ");
-																			$chk_transaction = dbq($trans_sql); 
-																			$transaction_toatl_count=$chk_transaction->num_rows;
-																			$trans_res = $chk_transaction->fetch_assoc();	
-                                                                        $send_dt = date('d-m-Y', strtotime($query_disp['sent_date']));
-                                                                        $send_dts = date('d-m-Y', strtotime($query_disp['sent_date']));
-                                                                        ?>
-                                                                        <tr>
-                                                                            <td><?php echo h($row_history['cust_name']) ?></td>
-                                                                            <td><?php echo h($row_history['j_code']) ?></td>
-                                                                            
-                                                                            <td><?php echo h($row_history['pub_id']) ?></td>
-                                                                            
-                                                                                <?php
-                                                                            if ($row_history['stage'] == 'FP') {
-																				$due_dts=date('d-m-Y', strtotime($row_history['due_dt']));
-                                                                                ?>
-																				<td><?php echo h($row_history['stage']); ?></td>
-                                                                                <td><?php echo fmt_dt($row_history['recv_dt']) ?></td>
-                                                                                <td><?php echo fmt_dt($row_history['due_dt']) ?></td>
-                                                                                <?php
-                                                                            } elseif($stage_r=='REV') {
-																				
-																				$due_dts=date('d-m-Y', strtotime($row_history['due_date']));
-                                                                                ?>
-																				 <td><?php echo  "REV" . $row_history['revision_count'] ?></td>
-
-                                                                                <td><?php echo fmt_dt($row_history['received_date']) ?></td>
-
-                                                                                <td><?php echo fmt_dt($row_history['due_date']) ?></td>
-                                                                                <?php
-                                                                            }
-																			elseif($stage_i=='ISSCOR') {
-																				
-																				$due_dts=date('d-m-Y', strtotime($row_history['due_dt']));
-                                                                                ?>
-																				 <td><?php echo h($row_history['stage']) ?></td>
-                                                                                <td><?php echo fmt_dt($row_history['created_dt']); ?></td>
-
-                                                                                <td><?php echo fmt_dt($row_history['due_dt']); ?></td>
-                                                                                <?php
-                                                                            }
-																			else{
-																				
-																				$due_dts=date('d-m-Y', strtotime($row_history['due_dt']));
-                                                                                ?>
-																				 <td><?php echo h($row_history['stage']) ?></td>
-                                                                                <td><?php echo fmt_dt($row_history['created_dt']) ?></td>
-
-                                                                                <td><?php echo fmt_dt($row_history['due_dt']) ?></td>
-                                                                                <?php
-                                                                            }
-																			
-                                                                            ?>
-                                                                             <td><?php echo $send_dt; ?></td>
-                                                                            <td>	<?php
-                                                                if (strtotime($send_dts) == strtotime($due_dts)) {
-                                                                    $l++;
-
-                                                                    echo "On Time";
-                                                                } elseif (strtotime($send_dts) > strtotime($due_dts)) {
-                                                                    $j++;
-                                                                    echo "Delay";
-                                                                } elseif (strtotime($send_dts) < strtotime($due_dts)) {
-                                                                    $k++;
-                                                                    echo "Ahead";
-                                                                }
-                                                                        ?>
-                                                                            </td>
-
-                    <td><a title="Job Card" href="job_card.php?id=<?php echo $row_history['id']; ?>" target="_blank" class="btn btn-xs btn-info"><i class="ace-icon fa fa-clock-o bigger-120"></i></a> </td> 
-                                                                        </tr>
-                                                                        <?php
-                                                                        $i++;
-                                                                    }
-                                                                }
-                                                                ?>
-                                                            <?php  if($total_pages > $limit) { ?>
-           	<tr>
-            <td colspan="4">
-            <div class="col-xs-12"><div class="dataTables_info" id="dynamic-table_info" role="status" aria-live="polite">Showing <?php echo ($start+1); ?> to <?php echo ($start+$limit > $total_pages) ? $total_pages : $start+$limit; ?> of <?php echo $total_pages; ?> entries</div></div>
-            </td>
-					<td align="center" colspan="8" class="inactive"><div class="dataTables_paginate paging_simple_numbers" id="datatable_paginate">
-            <ul class="pagination">
-              <?php paginate($start,$limit,$total_pages,$filePath,$otherParams); ?>
-            </ul>
-            </div></td>
-				  </tr>
-            <?php }  ?>
-</tbody>
-</table>
-                                                    </div>  
-													
-													 <?php }  ?>
+														 
                                                     </div> 
 													
-		<?php if ($_REQUEST['radio']=='cr') {?>											            
+		<?php if ($_REQUEST['radio']=='cr') { ?>
 <div id="consolidated-report-tables" >
                                                         <div class="page-header">
                                                             <h1>Consolidated-Report</h1>
                                                         </div>
-
+<?php if ($dcol == '') { ?>
+<div class="alert alert-warning" style="margin:15px 0 0 160px;width:70%;"><b>This report needs the delivery date column of <code>inw_conversion_dtl</code>.</b> None of the expected columns (<code>sent_date, delivery_dt, delivered_dt, delivery_date, delivered_date, client_delivery_dt, completed_dt, completed_date</code>) exists. Run <code>debug_master_status_report.php</code> to see the table's columns, then tell me which one holds the client delivery date.</div>
+<?php } else {
+	$cr_res = dbq("SELECT c.id, c.cust_name,
+			SUM(wd.stage = 'FP') AS fp_count, SUM(wd.stage LIKE 'REV%') AS rev_count, SUM(wd.stage LIKE 'FIN%') AS fin_count
+		FROM inw_conversion_dtl wd JOIN adm_customer_master c ON wd.cust_id = c.id
+		WHERE wd.status IN ('Client_Delivery','Delivery','Client Review','Completed') $cccb $search $search2 $search4
+		GROUP BY c.id, c.cust_name ORDER BY c.cust_name");
+	$cr_t = array(0, 0, 0);
+?>
                                                         <table id="consolidated-report-table" class="table table-striped table-bordered table-hover " style="width: 70%; margin-top: 30px; margin-left: 160px;">
                                                             <thead>
                                                                 <tr>
                                                                     <th rowspan="2">Customer</th>
-                                                                    <th rowspan="2">Journal</th>
                                                                     <th colspan="3">Stages</th>
                                                                 </tr>
                                                                 <tr>
@@ -2024,122 +1340,30 @@ columnTemplate.strokeOpacity = 1;
                                                                 </tr>
                                                             </thead>
                                                             <tbody>
-<?php
-    if($_REQUEST['cust_id']!="" && $_REQUEST['cust_id']!="all")
-	{
-    $sql_query = "SELECT * FROM `adm_customer_master` where id='".esc($_REQUEST['cust_id'])."' ";
-	}
-	else
-	{
-    $sql_query = "SELECT * FROM `adm_customer_master`";
-	}
-    $run_row = dbq($sql_query);
-    while ($row = $run_row->fetch_assoc()) {
-
-	if($_REQUEST['j_id']!="" && $_REQUEST['j_id']!="all")
-	{
-        $sql_journal = "SELECT `j_id`, `j_cust_id`,`j_code` FROM `adm_journals` WHERE  j_cust_id =".$row['id']." and j_id='".esc($_REQUEST['j_id'])."' ";
-	}
-	elseif($_REQUEST['dp_platform']!="")
-	{
-        $sql_journal = "SELECT `j_id`, `j_cust_id`,`j_code` FROM `adm_journals` WHERE  j_cust_id =".$row['id']." and j_platform='".esc($_REQUEST['dp_platform'])."'";
-	}
-		else
-	{
-        $sql_journal = "SELECT `j_id`, `j_cust_id`,`j_code` FROM `adm_journals` WHERE  j_cust_id =".$row['id']."";
-	}	
-		
-        $row_run = dbq($sql_journal);
-        $num_row = $row_run->num_rows;
-        $r = 1;
-		?>
-		  <tr>
-           <td rowspan="<?php echo max(1, (int) $num_row); ?>"><?php echo h($row['cust_name']); ?> </td>
-		<?php 
-		$fp_id_count=0;
-		$fev_id_count=0;
-		$fin_id_count=0;
-        while ($row_journal = $row_run->fetch_assoc()) {
-            // print_r($row_journal);
-			if($_REQUEST['j_id']!="" && $_REQUEST['j_id']!="all")
-			{
-            $j_id = (int) $_REQUEST['j_id'];
-			}
-			else
-			{
-			$j_id = (int) $row_journal['j_id'];
-			}
-			$cust_id = (int) $row['id'];
-			
-            $j_codes = $row_journal['j_code'];
-			
-
-			
-              $fp_query = "SELECT count(idh_id)as stage_count FROM `inw_dispatch_history` as wd,adm_customer_master as c, adm_journals as j WHERE wd.cust_id = c.id and wd.j_id = j.j_id  AND stage = 'FP' AND wd.cust_id = $cust_id    AND wd.j_id = $j_id    $search $search2 $search4 ";
-            $fp_run_query = dbq($fp_query);
-            $fp_row = $fp_run_query->fetch_assoc();
-            $fp_id_count = $fp_row['stage_count'];
-            $tfp_id_count+= $fp_id_count;
-
-            $rev_query = "SELECT count(idh_id)as rev_count FROM `inw_dispatch_history`as wd,adm_customer_master as c, adm_journals as j WHERE wd.cust_id = c.id and wd.j_id = j.j_id  AND  stage LIKE 'REV%' AND wd.cust_id = $cust_id AND wd.j_id = $j_id    $search $search2 $search4";
-
-            $fev_run_query = dbq($rev_query);
-            $fev_row = $fev_run_query->fetch_assoc();
-            $fev_id_count = $fev_row['rev_count'];
-            $tfev_id_count+= $fev_id_count;
-
-            $fin_query = "SELECT count(idh_id)as id FROM `inw_dispatch_history` as wd,adm_customer_master as c, adm_journals as j WHERE wd.cust_id = c.id and wd.j_id = j.j_id  AND  stage LIKE 'FIN%' AND wd.cust_id = $cust_id and  wd.j_id = $j_id   $search $search2 $search4";
-
-            $fin_run_query = dbq($fin_query);
-            $fin_row = $fin_run_query->fetch_assoc();
-            $fin_id_count = $fin_row['id'];
-            $tfin_id_count+= $fin_id_count;
-		 
-
-            if ($r == 1) {
-                ?>
-                                                                              
-                                                                                    <td><?php echo h($j_codes); ?></td>
-                                                                                    <td><?php echo  $fp_id_count; ?></td>
-                                                                                    <td><?php echo  $fev_id_count; ?></td>
-                                                                                    <td><?php echo  $fin_id_count; ?></td>
-                                                                                </tr>
-                <?php
-              
-            } else {
-                ?>
-                                                                                <tr>
-                                                                                    <td><?php echo h($j_codes); ?></td>
-                                                                                    <td><?php echo  $fp_id_count; ?></td>
-                                                                                    <td><?php echo  $fev_id_count; ?></td>
-                                                                                    <td><?php echo  $fin_id_count; ?></td>
-                                                                                </tr>
-                <?php
-            }
-			  $r++;
-        }
-		
-    if ($num_row == 0) { echo '<td colspan="4">-</td></tr>'; }
-    }
-//}
+<?php while ($cr_row = $cr_res->fetch_assoc()) {
+	$cr_t[0] += $cr_row['fp_count'];
+	$cr_t[1] += $cr_row['rev_count'];
+	$cr_t[2] += $cr_row['fin_count'];
 ?>
-
-																					<tr>
-                                                                                    <td></td>
-                                                                                    <td><b style="color:red;">Total</b></td>
-                                                                                    <td><b style="color:red;"><?php echo  $tfp_id_count; ?></b></td>
-                                                                                    <td><b style="color:red;"><?php echo  $tfev_id_count; ?></b></td>
-                                                                                    <td><b style="color:red;"><?php echo  $tfin_id_count; ?></b></td>
-                                                                                </tr>
+                                                                <tr>
+                                                                    <td><?php echo h($cr_row['cust_name']); ?></td>
+                                                                    <td><?php echo (int) $cr_row['fp_count']; ?></td>
+                                                                    <td><?php echo (int) $cr_row['rev_count']; ?></td>
+                                                                    <td><?php echo (int) $cr_row['fin_count']; ?></td>
+                                                                </tr>
+<?php } ?>
+                                                                <tr>
+                                                                    <td><b style="color:red;">Total</b></td>
+                                                                    <td><b style="color:red;"><?php echo $cr_t[0]; ?></b></td>
+                                                                    <td><b style="color:red;"><?php echo $cr_t[1]; ?></b></td>
+                                                                    <td><b style="color:red;"><?php echo $cr_t[2]; ?></b></td>
+                                                                </tr>
                                                             </tbody>
                                                         </table>
-                                                    <?php if (($tfp_id_count + $tfev_id_count + $tfin_id_count) == 0) { ?>
-<div class="alert alert-warning" style="margin:15px 0 0 160px;width:70%;">No records found. <b>This Consolidated report still reads the journal dispatch tables</b> (<code>inw_dispatch_history</code> / <code>adm_journals</code>), not the book tables, so it stays empty until it is pointed at the book dispatch table. Run <code>debug_master_status_report.php</code> (section 4) to check.</div>
 <?php } ?>
 </div>
-													<?php }?>
-                                                  
-												  
+<?php } ?>
+
 												  <?php if ($_REQUEST['radio']=='ce') {
 													  
 $fds=date('d-m-Y', strtotime('-3 days'));
@@ -2274,8 +1498,10 @@ $send_date =$tds;
 				}
 				else
 				{
-					$cnt_row = dbq("SELECT COUNT(wd.id) as num FROM `inw_inward_dtl` as wd, adm_customer_master as c, adm_journals as j WHERE wd.cust_id = c.id and wd.j_id = j.j_id and assigned_user_id='".(int)$row_users['id']."' and DATE_FORMAT(ce_pe_due_date,'%Y-%m-%d')='".$ce_day."' ")->fetch_assoc();
-					echo '<a href="assigned-work-list.php?uid='.(int)$row_users['id'].'&pdate='.urlencode($ce_day).'" target="_blank">'.(int)$cnt_row['num'].'</a>';
+					$cnt_row = (isset($conv_cols['assigned_user_id']) && isset($conv_cols['ce_pe_due_date']))
+						? dbq("SELECT COUNT(wd.id) as num FROM `inw_conversion_dtl` as wd WHERE wd.assigned_user_id='".(int)$row_users['id']."' and DATE_FORMAT(wd.ce_pe_due_date,'%Y-%m-%d')='".$ce_day."' ")->fetch_assoc()
+						: array('num' => '-');
+					echo '<a href="assigned-work-list.php?uid='.(int)$row_users['id'].'&pdate='.urlencode($ce_day).'" target="_blank">'.h($cnt_row['num']).'</a>';
 				}
 				echo '</td>';
 				$sstart_date = date ("Y-m-d", strtotime("+1 days", strtotime($sstart_date)));
@@ -2533,7 +1759,6 @@ if($_REQUEST['radio']=='dp')
             wip: {customer_select: 1, stage_cons: 1, dept_wip: 1, platform_dp: 0, status_wip: 1, wip_nodate: 0, date_sdf: 0, cepe_fsdf: 0, cepe_tsdf: 0},
             sfd: {customer_select: 1, stage_cons: 1, dept_wip: 0, platform_dp: 0, status_wip: 0, wip_nodate: 0, date_sdf: 1, cepe_fsdf: 0, cepe_tsdf: 0},
             dp: {customer_select: 1, stage_cons: 1, dept_wip: 0, platform_dp: 1, status_wip: 0, wip_nodate: 1, date_sdf: 0, cepe_fsdf: 0, cepe_tsdf: 0},
-            dr: {customer_select: 1, stage_cons: 1, dept_wip: 0, platform_dp: 0, status_wip: 0, wip_nodate: 1, date_sdf: 0, cepe_fsdf: 0, cepe_tsdf: 0},
             cr: {customer_select: 1, stage_cons: 0, dept_wip: 0, platform_dp: 1, status_wip: 0, wip_nodate: 1, date_sdf: 0, cepe_fsdf: 0, cepe_tsdf: 0},
             ce: {customer_select: 0, stage_cons: 0, dept_wip: 0, platform_dp: 0, status_wip: 0, wip_nodate: 0, date_sdf: 0, cepe_fsdf: 1, cepe_tsdf: 1}
         };

@@ -8,10 +8,9 @@
  *   2. every table + column the report reads (flags anything missing, e.g. a column that
  *      still only exists on the old journal tables after the books conversion)
  *   3. a dry run of the report's main queries (LIMIT 1) with timing and any SQL error
- *   4. Consolidated report  - the real queries with your filters: per-customer FP/REV/FIN counts
- *      (books, as on the WIP page) and per-customer/journal counts from the dispatch history
+ *   4. Consolidated report  - the real queries with your filters: open projects (WIP page) and delivered projects
  *   5. Delivery Performance - the real queries with your filters: counts, Ahead/On time/Delay totals,
- *      sample rows, and join diagnostics that explain why the report can be empty
+ *      sample rows, and which column is used as the client delivery date
  * Delete this file (or set $DEBUG_ENABLED = false) once the report is stable.
  */
 include ('dbc.php');
@@ -73,19 +72,19 @@ function dbg_show($title, $r, $max = 50) {
 
 /* table => columns the report relies on */
 $required = array(
-    'inw_book_dtl' => array('id', 'cust_id', 'department_id', 'status', 'stage', 'recv_dt', 'due_dt', 'created_dt', 'highpriority',
-        'manuscript_count', 'fig_complete_status', 'book_name', 'book_short_name', 'assigned_user_id', 'ce_pe_due_date'),
-    'inw_book_revisions_dtl' => array('r_id', 'b_id', 'received_date', 'due_date', 'correction_pages', 'revision_count', 'created_on'),
+    'inw_conversion_dtl' => array('id', 'cust_id', 'status', 'stage', 'recv_dt', 'due_dt', 'created_dt', 'book_short_name', 'digital_type',
+        'manuscript_count', 'fig', 'tab'),
+    /* optional: the report adapts when these are missing */
+    'inw_conversion_dtl (optional)' => array('highpriority', 'department_id', 'assigned_user_id', 'ce_pe_due_date'),
+    'inw_conversion_revisions_dtl' => array('r_id', 'b_id', 'received_date', 'due_date'),
+    'inw_conversion_revisions_dtl (optional)' => array('revision_count', 'correction_pages'),
+    'inw_conversion_project_dtl' => array('id', 'b_id', 'status', 'stage', 'department_id', 'manuscript_count', 'fig', 'tab', 'created_dt'),
+    'inw_conversion_service_dtl' => array('id', 'b_id', 'status'),
     'adm_customer_master' => array('id', 'cust_id', 'cust_name', 'font_color'),
     'adm_dept_master' => array('dept_name', 'dept_code', 'parent_id'),
     'inw_transactions' => array('id', 'project_id', 'process_user', 'current_status', 'completion_status', 'comments', 'stage', 'dept', 'created_dt'),
     'users' => array('id', 'full_name', 'approved', 'department_id'),
     'assigned_article_user' => array('aau_id', 'user_id', 'a_date', 'article_ids'),
-    /* journal tables still used by Delivery Performance / Consolidated / CE-PE / Detailed reports */
-    'inw_dispatch_history' => array('idh_id', 'a_id', 'cust_id', 'j_id', 'stage', 'sent_date'),
-    'inw_inward_dtl' => array('id', 'cust_id', 'j_id', 'pub_id', 'stage', 'status', 'recv_dt', 'due_dt', 'created_dt', 'manuscript_count', 'page_count', 'assigned_user_id', 'ce_pe_due_date', 'v_issue_id'),
-    'inw_revisions_dtl' => array('inw_id', 'r_id', 'revision_count', 'received_date', 'due_date', 'correction_pages'),
-    'adm_journals' => array('j_id', 'j_cust_id', 'j_code', 'j_platform'),
 );
 
 $files = array('dbc.php', 'includes/paginate.php', 'includes/header.php', 'includes/left_sidebar.php', 'includes/footer.php',
@@ -93,11 +92,11 @@ $files = array('dbc.php', 'includes/paginate.php', 'includes/header.php', 'inclu
     'job_card.php', 'pending-list.php', 'assigned-work-list.php', 'project_time.php');
 
 $queries = array(
-    'WIP (books)' => "SELECT c.cust_name, wd.*, r.received_date, r.due_date, r.correction_pages, r.revision_count FROM `inw_book_dtl` as wd LEFT JOIN inw_book_revisions_dtl as r ON (wd.`id` = r.`b_id` AND r.r_id = (SELECT MAX(r2.r_id) FROM inw_book_revisions_dtl as r2 WHERE r2.b_id = wd.`id`)), adm_customer_master as c WHERE wd.cust_id = c.id AND wd.status NOT IN ('Client Review','Completed') LIMIT 1",
-    'Schedules - FP (books)' => "SELECT wd.id, wd.cust_id, wd.status, wd.due_dt, wd.recv_dt, wd.book_short_name, wd.stage, wd.department_id FROM inw_book_dtl as wd WHERE wd.stage='FP' LIMIT 1",
-    'Schedules - REV/FIN (books)' => "SELECT wd.id, r.due_date, r.received_date FROM inw_book_dtl as wd LEFT JOIN inw_book_revisions_dtl as r ON wd.id = r.b_id WHERE wd.stage LIKE 'REV%' GROUP BY r.b_id LIMIT 1",
-    'Transactions per book' => "SELECT u.full_name, t.current_status, t.id FROM inw_transactions as t, users as u WHERE t.process_user = u.id LIMIT 1",
-    'Delivery performance' => "SELECT wd.idh_id, c.cust_name, j.j_code FROM inw_dispatch_history as wd, adm_customer_master as c, adm_journals as j WHERE wd.cust_id = c.id AND wd.j_id = j.j_id LIMIT 1",
+    'WIP (conversion)' => "SELECT c.cust_name, wd.*, r.received_date, r.due_date FROM `inw_conversion_dtl` as wd LEFT JOIN inw_conversion_revisions_dtl as r ON (wd.`id` = r.`b_id` AND r.r_id = (SELECT MAX(r2.r_id) FROM inw_conversion_revisions_dtl as r2 WHERE r2.b_id = wd.`id`)), adm_customer_master as c WHERE wd.cust_id = c.id AND wd.status NOT IN ('Client_Delivery','Client Review','Completed') LIMIT 1",
+    'Chapters / services counts' => "SELECT (SELECT COUNT(id) FROM inw_conversion_project_dtl WHERE b_id = wd.id AND status IN ('Client_Delivery','Delivery')) AS ccount, (SELECT COUNT(id) FROM inw_conversion_service_dtl WHERE b_id = wd.id AND status IN ('Client_Delivery','Delivery')) AS sccount FROM inw_conversion_dtl wd LIMIT 1",
+    'Schedules - FP' => "SELECT wd.id, wd.cust_id, wd.status, wd.due_dt, wd.recv_dt, wd.book_short_name, wd.stage FROM inw_conversion_dtl as wd WHERE wd.stage='FP' LIMIT 1",
+    'Schedules - REV/FIN' => "SELECT wd.id, r.due_date, r.received_date FROM inw_conversion_dtl as wd LEFT JOIN inw_conversion_revisions_dtl as r ON wd.id = r.b_id WHERE wd.stage LIKE 'REV%' GROUP BY r.b_id LIMIT 1",
+    'Transactions per project' => "SELECT u.full_name, t.current_status, t.id FROM inw_transactions as t, users as u WHERE t.process_user = u.id LIMIT 1",
     'CE/PE allotment' => "SELECT COUNT(aau_id) AS total_count FROM assigned_article_user LIMIT 1",
 );
 
@@ -168,7 +167,7 @@ $custs = dbg_run("SELECT id, cust_name FROM adm_customer_master ORDER BY cust_na
 <h2>2. Tables and columns used by the report</h2>
 <?php foreach ($required as $table => $cols) {
     $have = array();
-    $res = $db->query("SHOW COLUMNS FROM `" . $db->real_escape_string($table) . "`");
+    $res = $db->query("SHOW COLUMNS FROM `" . $db->real_escape_string(preg_replace('/ \(optional\)$/', '', $table)) . "`");
     $table_ok = (bool) $res;
     if ($res) {
         while ($c = $res->fetch_assoc()) {
@@ -237,73 +236,67 @@ $custs = dbg_run("SELECT id, cust_name FROM adm_customer_master ORDER BY cust_na
     <button type="submit">Run</button>
 </form>
 <?php
-$book_cons = dbg_run("SELECT c.id, c.cust_name,
+$open_cons = dbg_run("SELECT c.id, c.cust_name,
         COALESCE(SUM(wd.stage = 'FP'), 0) AS FP,
         COALESCE(SUM(wd.stage LIKE 'REV%'), 0) AS REV,
         COALESCE(SUM(wd.stage LIKE '%FIN%'), 0) AS FIN
     FROM adm_customer_master c
-    LEFT JOIN inw_book_dtl wd ON wd.cust_id = c.id AND wd.status NOT IN ('Delivery','Client Review','Completed') $search_book
+    LEFT JOIN inw_conversion_dtl wd ON wd.cust_id = c.id AND wd.status NOT IN ('Client_Delivery','Delivery','Client Review','Completed') $search_book
     WHERE 1 " . (($flt['cust_id'] !== 'all') ? " AND c.id = '" . esc($flt['cust_id']) . "'" : '') . "
     GROUP BY c.id, c.cust_name ORDER BY c.cust_name");
-dbg_show('4a. Consolidated - books (the table shown on the WIP page)', $book_cons, 200);
+dbg_show('4a. Consolidated - open conversion projects (the table under the WIP report; period = created date)', $open_cons, 200);
 
-$jr_cons = dbg_run("SELECT c.cust_name, j.j_code,
-        SUM(wd.stage = 'FP') AS FP, SUM(wd.stage LIKE 'REV%') AS REV, SUM(wd.stage LIKE 'FIN%') AS FIN
-    FROM inw_dispatch_history wd
-    JOIN adm_customer_master c ON wd.cust_id = c.id
-    JOIN adm_journals j ON wd.j_id = j.j_id
-    WHERE 1 $cust_sql $search
-    GROUP BY c.id, c.cust_name, j.j_id, j.j_code ORDER BY c.cust_name, j.j_code");
-dbg_show('4b. Consolidated - dispatch history by customer / journal (radio "Consolidated-report")', $jr_cons, 200);
-if (!$jr_cons['rows'] && $jr_cons['err'] === '') {
-    echo '<p style="color:#c00;"><b>4b is empty.</b> The report counts rows in <code>inw_dispatch_history</code> joined to <code>adm_journals</code>. If the books are not dispatched through that table the report will always be empty &ndash; see the diagnostics in section 5.</p>';
+/* delivery date column used for delivered projects */
+$dcols = array();
+$cres = $db->query("SHOW COLUMNS FROM inw_conversion_dtl");
+while ($cres && ($cc = $cres->fetch_assoc())) {
+    $dcols[strtolower($cc['Field'])] = isset($cc['Type']) ? $cc['Type'] : '';
 }
-?>
+$dcol = '';
+foreach (array('sent_date', 'delivery_dt', 'delivered_dt', 'delivery_date', 'delivered_date', 'client_delivery_dt', 'completed_dt', 'completed_date') as $cand) {
+    if (isset($dcols[$cand])) { $dcol = $cand; break; }
+}
+$date_like = array();
+foreach ($dcols as $name => $type) {
+    if (preg_match('/date|time/i', $type) || preg_match('/(_dt|date|_on)$/', $name)) { $date_like[] = $name . ' (' . $type . ')'; }
+}
+echo '<p><b>Delivery date column used:</b> ' . ($dcol !== '' ? '<code>' . h($dcol) . '</code>' : '<b style="color:#c00;">none found</b>')
+   . '<br>Date-like columns in <code>inw_conversion_dtl</code>: <code>' . h(implode(', ', $date_like)) . '</code></p>';
+
+if ($dcol === '') {
+    echo '<p style="color:#c00;"><b>Consolidated (delivered) and Delivery Performance cannot be calculated:</b> tell me which of the columns above holds the client delivery date.</p>';
+} else {
+    $sent = "wd.$dcol";
+    $search_d = str_replace('wd.sent_date', $sent, $search);
+    $deliv = "wd.status IN ('Client_Delivery','Delivery','Client Review','Completed')";
+    $cust_d = ($flt['cust_id'] !== 'all') ? " AND wd.cust_id = '" . esc($flt['cust_id']) . "' " : '';
+    dbg_show('4b. Consolidated - delivered projects by customer (radio "Consolidated-report")', dbg_run("SELECT c.cust_name,
+            SUM(wd.stage = 'FP') AS FP, SUM(wd.stage LIKE 'REV%') AS REV, SUM(wd.stage LIKE 'FIN%') AS FIN
+        FROM inw_conversion_dtl wd JOIN adm_customer_master c ON wd.cust_id = c.id
+        WHERE $deliv $cust_d $search_d GROUP BY c.id, c.cust_name ORDER BY c.cust_name"), 200);
+    ?>
 
 <h2>5. Delivery Performance</h2>
-<p>Uses the same filters as section 4.</p>
+<p>Uses the same filters as section 4 and the delivery date column <code><?php echo h($dcol); ?></code>.</p>
 <?php
-$due_expr = "IF(wd.stage LIKE 'REV%', rv.due_date, i.due_dt)";
-$dp_from = "FROM inw_dispatch_history wd
-    JOIN adm_customer_master c ON wd.cust_id = c.id
-    JOIN adm_journals j ON wd.j_id = j.j_id
-    LEFT JOIN inw_inward_dtl i ON i.id = wd.a_id
-    LEFT JOIN inw_revisions_dtl rv ON rv.inw_id = wd.a_id AND wd.stage LIKE 'REV%' AND rv.revision_count = REPLACE(wd.stage, 'REV', '')
-    WHERE 1 $cust_sql $search";
-
-dbg_show('5a. Dispatched count per customer (the coloured list at the top of the report)', dbg_run("SELECT c.cust_name, COUNT(wd.idh_id) AS sent_count
-    FROM inw_dispatch_history wd JOIN adm_customer_master c ON wd.cust_id = c.id JOIN adm_journals j ON wd.j_id = j.j_id
-    WHERE 1 $cust_sql $search GROUP BY c.id, c.cust_name ORDER BY c.cust_name"), 200);
-
-dbg_show('5b. Schedule totals (Ahead / On time / Delay) - feeds the chart', dbg_run("SELECT COUNT(*) AS total,
-        SUM(DATE(sent_date) < DATE(due)) AS Ahead,
-        SUM(DATE(sent_date) = DATE(due)) AS On_time,
-        SUM(DATE(sent_date) > DATE(due)) AS Delay,
-        SUM(due IS NULL) AS no_due_date_found
-    FROM (SELECT wd.sent_date, $due_expr AS due $dp_from) x"));
-
-dbg_show('5c. Latest 20 rows of the report table', dbg_run("SELECT wd.idh_id, c.cust_name, j.j_code, i.pub_id AS file_name, wd.stage,
-        DATE(wd.sent_date) AS dispatched, DATE($due_expr) AS due,
-        CASE WHEN $due_expr IS NULL THEN 'no due date' WHEN DATE(wd.sent_date) = DATE($due_expr) THEN 'On Time'
-             WHEN DATE(wd.sent_date) > DATE($due_expr) THEN 'Delay' ELSE 'Ahead' END AS schedule
-    $dp_from ORDER BY wd.idh_id DESC LIMIT 20"), 20);
-
-echo '<h3>5d. Why could it be empty? (diagnostics, filters ignored unless stated)</h3>';
-dbg_show('Dispatch history overview', dbg_run("SELECT COUNT(*) AS total_rows, MIN(sent_date) AS first_sent, MAX(sent_date) AS last_sent,
-        SUM(wd.cust_id IS NULL OR wd.cust_id = 0) AS no_customer,
-        SUM(wd.j_id IS NULL OR wd.j_id = 0) AS no_journal
-    FROM inw_dispatch_history wd"));
-dbg_show('Rows in the selected period at each join step', dbg_run("SELECT
-        COUNT(*) AS in_period,
-        SUM(c.id IS NOT NULL) AS with_customer,
-        SUM(c.id IS NOT NULL AND j.j_id IS NOT NULL) AS with_customer_and_journal,
-        SUM(i.id IS NOT NULL) AS with_inward_record
-    FROM inw_dispatch_history wd
-    LEFT JOIN adm_customer_master c ON wd.cust_id = c.id
-    LEFT JOIN adm_journals j ON wd.j_id = j.j_id
-    LEFT JOIN inw_inward_dtl i ON i.id = wd.a_id
-    WHERE 1 $cust_sql $search"));
-dbg_show('Tables whose name contains "dispatch" or "book" (a book-specific dispatch table may be the one the report should read)', dbg_run("SELECT table_name, table_rows FROM information_schema.tables WHERE table_schema = DATABASE() AND (table_name LIKE '%dispatch%' OR table_name LIKE '%book%') ORDER BY table_name"), 100);
+    $due_expr = "IF(wd.stage LIKE 'REV%' AND r.due_date IS NOT NULL, r.due_date, wd.due_dt)";
+    $dp_from = "FROM inw_conversion_dtl wd JOIN adm_customer_master c ON wd.cust_id = c.id
+        LEFT JOIN inw_conversion_revisions_dtl r ON (wd.id = r.b_id AND r.r_id = (SELECT MAX(r2.r_id) FROM inw_conversion_revisions_dtl r2 WHERE r2.b_id = wd.id))
+        WHERE $deliv $cust_d $search_d";
+    dbg_show('5a. Dispatched count per customer', dbg_run("SELECT c.cust_name, COUNT(wd.id) AS sent_count $dp_from GROUP BY c.id, c.cust_name ORDER BY c.cust_name"), 200);
+    dbg_show('5b. Schedule totals (Ahead / On time / Delay) - feeds the chart', dbg_run("SELECT COUNT(*) AS total,
+            COALESCE(SUM(DATE(sentdt) < DATE(due)),0) AS Ahead, COALESCE(SUM(DATE(sentdt) = DATE(due)),0) AS On_time,
+            COALESCE(SUM(DATE(sentdt) > DATE(due)),0) AS Delay, COALESCE(SUM(due IS NULL),0) AS no_due_date_found
+        FROM (SELECT $sent AS sentdt, $due_expr AS due $dp_from) x"));
+    dbg_show('5c. Latest 20 rows of the report table', dbg_run("SELECT wd.id, c.cust_name, wd.book_short_name AS project, wd.stage,
+            DATE($sent) AS dispatched, DATE($due_expr) AS due,
+            CASE WHEN $due_expr IS NULL THEN 'no due date' WHEN DATE($sent) = DATE($due_expr) THEN 'On Time'
+                 WHEN DATE($sent) > DATE($due_expr) THEN 'Delay' ELSE 'Ahead' END AS schedule
+        $dp_from ORDER BY wd.id DESC LIMIT 20"), 20);
+    dbg_show('5d. Delivered projects overview (all dates)', dbg_run("SELECT COUNT(*) AS delivered_total, MIN($sent) AS first_delivered, MAX($sent) AS last_delivered,
+            SUM($sent IS NULL) AS no_delivery_date FROM inw_conversion_dtl wd WHERE $deliv"));
+    dbg_show('Status values in use', dbg_run("SELECT status, COUNT(*) AS projects FROM inw_conversion_dtl GROUP BY status ORDER BY projects DESC"), 50);
+}
 ?>
 
 <p>Tip: open the report itself with <code>?debug=1</code> to see the exact SQL, timings and PHP warnings for a real request.</p>
