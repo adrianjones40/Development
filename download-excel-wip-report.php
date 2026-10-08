@@ -188,8 +188,8 @@ header("Pragma: public");
 while ($row_history = $articles->fetch_assoc()) {
     list($recv_dt, $due_dt) = xls_dates($row_history);
 
-    $trans = dbq("SELECT u.full_name,t.current_status FROM `inw_transactions` as t,users as u WHERE t.process_user = u.id AND t.`project_id` = '" . (int) $row_history['id'] . "' AND t.created_dt > '2020-03-01'  AND t.current_status NOT IN ('Completed','Take Over') AND t.stage = '" . esc($row_history['stage']) . "' AND (t.id=(select id from `inw_transactions` where dept!=9 and `project_id` = '" . (int) $row_history['id'] . "' ORDER BY `id` DESC limit 1))  ORDER BY t.`id` DESC limit 1")->fetch_assoc();
-    $assign_comments = dbq("select comments from inw_transactions where project_id='" . (int) $row_history['id'] . "' and dept='14' and completion_status=6 order by id desc limit 1");
+    $trans = dbq("SELECT u.full_name,t.current_status FROM `inw_conversion_project_transactions` as t,users as u WHERE t.process_user = u.id AND t.`project_id` = '" . (int) $row_history['id'] . "' AND t.created_dt > '2020-03-01'  AND t.current_status NOT IN ('Completed','Take Over') AND t.stage = '" . esc($row_history['stage']) . "' AND (t.id=(select id from `inw_conversion_project_transactions` where dept!=9 and `project_id` = '" . (int) $row_history['id'] . "' ORDER BY `id` DESC limit 1))  ORDER BY t.`id` DESC limit 1")->fetch_assoc();
+    $assign_comments = dbq("select comments from inw_conversion_project_transactions where project_id='" . (int) $row_history['id'] . "' and dept='14' and completion_status=6 order by id desc limit 1");
     $res_ac = $assign_comments->fetch_assoc();
     $assign_cepe = $show_alloc ? dbq_row("select full_name from users where id='" . (int) $row_history['assigned_user_id'] . "'") : array();
 

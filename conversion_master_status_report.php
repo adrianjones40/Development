@@ -115,12 +115,12 @@ function msr_delivery_col() {
 function msr_status_html($row, $with_comments) {
     $id = (int) $row['id'];
     $o = '<span class="label label-sm label-success">' . h($row['status']) . '</span>';
-    $t = dbq("SELECT u.full_name,t.current_status FROM `inw_transactions` as t,users as u WHERE t.process_user = u.id AND t.`project_id` = '" . $id . "' AND t.created_dt > '2020-03-01' AND t.current_status NOT IN ('Completed','Take Over') AND t.stage = '" . esc($row['stage']) . "' AND (t.id=(select id from `inw_transactions` where dept!=9 and `project_id` = '" . $id . "' ORDER BY `id` DESC limit 1)) ORDER BY t.`id` DESC limit 1")->fetch_assoc();
+    $t = dbq("SELECT u.full_name,t.current_status FROM `inw_conversion_project_transactions` as t,users as u WHERE t.process_user = u.id AND t.`project_id` = '" . $id . "' AND t.created_dt > '2020-03-01' AND t.current_status NOT IN ('Completed','Take Over') AND t.stage = '" . esc($row['stage']) . "' AND (t.id=(select id from `inw_conversion_project_transactions` where dept!=9 and `project_id` = '" . $id . "' ORDER BY `id` DESC limit 1)) ORDER BY t.`id` DESC limit 1")->fetch_assoc();
     if ($t) {
         $o .= '<span class="label label-sm label-info">' . h($t['full_name']) . '</span>|<span class="label label-sm label-warning">' . h($t['current_status']) . '</span>';
     }
     if ($with_comments) {
-        $c = dbq("select comments from inw_transactions where project_id='" . $id . "' and dept='14' and completion_status=6 order by id desc limit 1");
+        $c = dbq("select comments from inw_conversion_project_transactions where project_id='" . $id . "' and dept='14' and completion_status=6 order by id desc limit 1");
         if ($c->num_rows > 0) {
             $cr = $c->fetch_assoc();
             $o .= '|<span class="label label-sm label-danger">' . ($cr['comments'] != '' ? h($cr['comments']) : 'No Comments') . '</span>';

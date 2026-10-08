@@ -82,7 +82,7 @@ $required = array(
     'inw_conversion_service_dtl' => array('id', 'b_id', 'status'),
     'adm_customer_master' => array('id', 'cust_id', 'cust_name', 'font_color'),
     'adm_dept_master' => array('dept_name', 'dept_code', 'parent_id'),
-    'inw_transactions' => array('id', 'project_id', 'process_user', 'current_status', 'completion_status', 'comments', 'stage', 'dept', 'created_dt'),
+    'inw_conversion_project_transactions' => array('id', 'project_id', 'process_user', 'current_status', 'completion_status', 'comments', 'stage', 'dept', 'created_dt'),
     'users' => array('id', 'full_name', 'approved', 'department_id'),
     'assigned_article_user' => array('aau_id', 'user_id', 'a_date', 'article_ids'),
 );
@@ -96,7 +96,7 @@ $queries = array(
     'Chapters / services counts' => "SELECT (SELECT COUNT(id) FROM inw_conversion_project_dtl WHERE b_id = wd.id AND status IN ('Client_Delivery','Delivery')) AS ccount, (SELECT COUNT(id) FROM inw_conversion_service_dtl WHERE b_id = wd.id AND status IN ('Client_Delivery','Delivery')) AS sccount FROM inw_conversion_dtl wd LIMIT 1",
     'Schedules - FP' => "SELECT wd.id, wd.cust_id, wd.status, wd.due_dt, wd.recv_dt, wd.book_short_name, wd.stage FROM inw_conversion_dtl as wd WHERE wd.stage='FP' LIMIT 1",
     'Schedules - REV/FIN' => "SELECT wd.id, r.due_date, r.received_date FROM inw_conversion_dtl as wd LEFT JOIN inw_conversion_revisions_dtl as r ON wd.id = r.b_id WHERE wd.stage LIKE 'REV%' GROUP BY r.b_id LIMIT 1",
-    'Transactions per project' => "SELECT u.full_name, t.current_status, t.id FROM inw_transactions as t, users as u WHERE t.process_user = u.id LIMIT 1",
+    'Transactions per project' => "SELECT u.full_name, t.current_status, t.id FROM inw_conversion_project_transactions as t, users as u WHERE t.process_user = u.id LIMIT 1",
     'CE/PE allotment' => "SELECT COUNT(aau_id) AS total_count FROM assigned_article_user LIMIT 1",
 );
 
